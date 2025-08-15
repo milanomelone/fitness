@@ -175,10 +175,9 @@ def undo_last_set_today(tag: str, name: str):
 # ------------------------- STICKY TIMER (Parent-DOM, Fullscreen Blink) -------------------------
 def render_sticky_timer():
     """
-    Sticky-Timer oben rechts (Parent-DOM):
-    - Globales window.gxTimer Singleton (tStart/tEnd in ms)
-    - Buttons & Tick lesen/schreiben immer gxTimer
-    - Bei jedem Streamlit-Render werden tStart/tEnd aus Python gesetzt
+    Sticky-Timer oben rechts (Parent-DOM) mit Singleton:
+    - Korrigiertes tick(): rem zuerst berechnen -> Blink/Ton/Vibration sicher auslösen
+    - blink()/beep() als Methoden von window.parent.gxTimer
     """
     start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
     end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
@@ -209,6 +208,40 @@ def render_sticky_timer():
             shift: function(ms){
               if (!this.tEnd) return;
               this.tEnd = Math.max(Date.now(), this.tEnd + ms);
+            },
+            blink: function(){
+              var ov = D.getElementById('gx-flash-overlay');
+              if (!ov){
+                ov = D.createElement('div');
+                ov.id = 'gx-flash-overlay';
+                ov.style.cssText = [
+                  'position:fixed','inset:0','background:#00c853',
+                  'z-index:2147483646','pointer-events:none','opacity:0',
+                  'transition:opacity .2s ease'
+                ].join(';');
+                D.body.appendChild(ov);
+              }
+              var flashes = 0;
+              var intv = setInterval(function(){
+                ov.style.opacity = (flashes % 2 === 0) ? '0.6' : '0';
+                flashes++;
+                if (flashes >= 10){
+                  clearInterval(intv);
+                  ov.style.opacity = '0';
+                }
+              }, 500);
+            },
+            beep: function(){
+              try {
+                var ctx = new (W.AudioContext || W.webkitAudioContext)();
+                var o = ctx.createOscillator(); var g = ctx.createGain();
+                o.type = 'sine'; o.frequency.value = 880;
+                o.connect(g); g.connect(ctx.destination);
+                g.gain.setValueAtTime(0.0001, ctx.currentTime);
+                g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
+                g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+                o.start(); o.stop(ctx.currentTime + 0.37);
+              } catch(e) {}
             }
           };
 
@@ -263,37 +296,36 @@ def render_sticky_timer():
           panel.appendChild(bStop);
           D.body.appendChild(panel);
 
-          // Effekte
-          function fullBlink(){
-            var ov = D.createElement('div');
-            ov.id = 'gx-flash-overlay';
-            ov.style.cssText = [
-              'position:fixed','inset:0','background:#00c853',
-              'z-index:2147483646','pointer-events:none','opacity:0'
-            ].join(';');
-            D.body.appendChild(ov);
-            var flashes = 0;
-            var intv = setInterval(function(){
-              ov.style.opacity = (flashes % 2 === 0) ? '0.6' : '0';
-              flashes++;
-              if (flashes >= 10){
-                clearInterval(intv);
-                if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+          function fmt(sec){
+            if (sec < 60) return sec + 's';
+            var m = Math.floor(sec/60), s = sec % 60;
+            return m + ':' + (s<10?('0'+s):s);
+          }
+
+          function tick(){
+            var tEnd = W.gxTimer.tEnd;
+            if (!tEnd){
+              badge.textContent = '⏱ 0s';
+              return;
+            }
+            // *** WICHTIG: rem zuerst berechnen ***
+            var rem = Math.ceil((tEnd - Date.now())/1000);
+            if (rem <= 0){
+              badge.textContent = '⏱ 0s';
+              if (!W.gxTimer.done){
+                W.gxTimer.done = true;
+                W.gxTimer.blink();
+                W.gxTimer.beep();
+                if (W.navigator && W.navigator.vibrate) {
+                  W.navigator.vibrate([200,100,200,100,200]);
+                }
               }
-            }, 500);
+              return;
+            }
+            badge.textContent = '⏱ ' + fmt(rem);
           }
-          function beep(){
-            try {
-              var ctx = new (W.AudioContext || W.webkitAudioContext)();
-              var o = ctx.createOscillator(); var g = ctx.createGain();
-              o.type = 'sine'; o.frequency.value = 880;
-              o.connect(g); g.connect(ctx.destination);
-              g.gain.setValueAtTime(0.0001, ctx.currentTime);
-              g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
-              g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-              o.start(); o.stop(ctx.currentTime + 0.37);
-            } catch(e) {}
-          }
+
+          tick(); W.setInterval(tick, 250);
 
           // Buttons -> Singleton
           b60 .addEventListener('click', function(){ W.gxTimer.start(60);  });
@@ -302,36 +334,12 @@ def render_sticky_timer():
           bM5 .addEventListener('click', function(){ W.gxTimer.shift(-5000); });
           bP5 .addEventListener('click', function(){ W.gxTimer.shift(+5000); });
           bStop.addEventListener('click', function(){ W.gxTimer.stop(); });
-
-          function fmt(sec){
-            if (sec < 60) return sec + 's';
-            var m = Math.floor(sec/60), s = sec % 60;
-            return m + ':' + (s<10?('0'+s):s);
-          }
-          function tick(){
-            var tEnd = W.gxTimer.tEnd;
-            if (!tEnd || tEnd <= Date.now()){
-              badge.textContent = '⏱ 0s';
-              return;
-            }
-            var rem = Math.max(0, Math.floor((tEnd - Date.now())/1000));
-            badge.textContent = '⏱ ' + fmt(rem);
-            if (rem === 0 && !W.gxTimer.done){
-              W.gxTimer.done = true;
-              fullBlink(); beep();
-              if (W.navigator && W.navigator.vibrate) {
-                W.navigator.vibrate([200,100,200,100,200]);
-              }
-            }
-          }
-          tick(); W.setInterval(tick, 250);
         }
 
         // 2) Bei JEDEM Streamlit-Render: Backend-Start/Ende in Singleton setzen
         var newStart = """ + str(start_ms) + """;
         var newEnd   = """ + str(end_ms) + """;
         if (newEnd > 0) {
-          // Nur setzen, wenn das Backend einen Timer vorgibt (z.B. Auto-Start nach ✅)
           W.gxTimer.tStart = newStart;
           W.gxTimer.tEnd   = newEnd;
           W.gxTimer.done   = false;
@@ -340,7 +348,6 @@ def render_sticky_timer():
     </script>
     """
     st.components.v1.html(html, height=0)
-    
 # ------------------------- SIDEBAR (nur Settings – KEIN Timer) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
