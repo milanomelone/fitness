@@ -5,7 +5,79 @@ import os
 
 st.set_page_config(page_title="Progressions-Coach A/B", layout="centered")
 
-# ------------------------- PLAN -------------------------
+# ------------------------- SESSION STATE (früh, damit Timer sofort kann) -------------------------
+if "timer_start" not in st.session_state: st.session_state["timer_start"] = None
+if "timer_end" not in st.session_state:   st.session_state["timer_end"]   = None
+if "auto_timer_seconds" not in st.session_state: st.session_state["auto_timer_seconds"] = 90
+if "saved_flags" not in st.session_state: st.session_state["saved_flags"] = {}
+if "chosen_map" not in st.session_state:  st.session_state["chosen_map"]  = {}  # key: (tag, idx, date) -> chosen_name
+if "autopilot" not in st.session_state:   st.session_state["autopilot"]   = False
+if "focus_anchor" not in st.session_state:st.session_state["focus_anchor"]= ""
+if "current_date" not in st.session_state:
+    st.session_state["current_date"] = date.today().isoformat()
+
+# Tageswechsel -> Haken & Auswahl leeren
+if st.session_state["current_date"] != date.today().isoformat():
+    st.session_state["current_date"] = date.today().isoformat()
+    st.session_state["saved_flags"].clear()
+    st.session_state["chosen_map"].clear()
+    st.session_state["focus_anchor"] = ""
+
+# ------------------------- STICKY TIMER (immer rendern, ganz oben) -------------------------
+def render_sticky_timer():
+    start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
+    end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
+    html = """
+    <script>
+    (function(){
+      var W = window.parent || window, D = W.document;
+      if (!W.gxTimer) {
+        W.gxTimer = {
+          tStart:0, tEnd:0, done:false, badge:null,
+          start:function(s){var n=Date.now();this.tStart=n;this.tEnd=n+s*1000;this.done=false;},
+          stop:function(){this.tStart=0;this.tEnd=0;this.done=true;if(this.badge) this.badge.textContent='⏱ 0s';},
+          shift:function(ms){if(!this.tEnd) return; this.tEnd=Math.max(Date.now(), this.tEnd+ms);},
+          blink:function(){
+            var old=D.getElementById('gx-flash-overlay'); if(old&&old.parentNode) old.parentNode.removeChild(old);
+            var ov=D.createElement('div'); ov.id='gx-flash-overlay';
+            ov.style.cssText='position:fixed;inset:0;background:#00c853;opacity:0;pointer-events:none;z-index:2147483647;transition:opacity 120ms ease';
+            D.body.appendChild(ov); void ov.offsetHeight;
+            var f=0,intv=setInterval(function(){ov.style.opacity=(f%2===0)?'0.65':'0';f++;if(f>=10){clearInterval(intv);if(ov&&ov.parentNode)ov.parentNode.removeChild(ov);}},500);
+          },
+          beep:function(){
+            try{var ctx=new (W.AudioContext||W.webkitAudioContext)(),o=ctx.createOscillator(),g=ctx.createGain();
+            o.type='sine';o.frequency.value=880;o.connect(g);g.connect(ctx.destination);
+            g.gain.setValueAtTime(0.0001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.5,ctx.currentTime+0.02);
+            g.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+0.35);o.start();o.stop(ctx.currentTime+0.37);}catch(e){}}
+        };
+        var p=D.createElement('div'); p.id='gx-timer-panel';
+        p.style.cssText='position:fixed;right:16px;top:16px;z-index:2147483647;display:flex;gap:8px;align-items:center';
+        var b=D.createElement('div'); b.id='gx-timer-badge'; b.textContent='⏱ 0s';
+        b.style.cssText='background:rgba(20,20,20,.92);color:#fff;padding:8px 12px;border-radius:12px;font-size:18px;font-weight:800;border:1px solid rgba(255,255,255,.08);box-shadow:0 8px 24px rgba(0,0,0,.35)';
+        W.gxTimer.badge=b;
+        function mk(id,lab){var x=D.createElement('button');x.id=id;x.textContent=lab;x.style.cssText='font-size:12px;font-weight:800;line-height:1;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.15);background:rgba(32,32,32,.95);color:#fff;cursor:pointer';x.onmousedown=()=>x.style.transform='translateY(1px)';x.onmouseup=()=>x.style.transform='';return x;}
+        var s60=mk('gx60','60s'),s90=mk('gx90','90s'),s120=mk('gx120','120s'),m5=mk('gxm5','−5s'),p5=mk('gxp5','+5s'),stp=mk('gxstp','Stop');
+        p.appendChild(b); p.appendChild(s60); p.appendChild(s90); p.appendChild(s120); p.appendChild(m5); p.appendChild(p5); p.appendChild(stp); D.body.appendChild(p);
+        s60.onclick=function(){W.gxTimer.start(60)}; s90.onclick=function(){W.gxTimer.start(90)}; s120.onclick=function(){W.gxTimer.start(120)};
+        m5.onclick=function(){W.gxTimer.shift(-5000)}; p5.onclick=function(){W.gxTimer.shift(5000)}; stp.onclick=function(){W.gxTimer.stop()};
+        function fmt(s){if(s<60)return s+'s';var m=Math.floor(s/60),x=s%60;return m+':' + (x<10?('0'+x):x);}
+        function tick(){var e=W.gxTimer.tEnd;if(!e){b.textContent='⏱ 0s';return;} var rem=Math.floor((e-Date.now())/1000);
+          if(rem<=0){b.textContent='⏱ 0s'; if(!W.gxTimer.done){W.gxTimer.done=true;W.gxTimer.blink();W.gxTimer.beep(); if(W.navigator&&W.navigator.vibrate)W.navigator.vibrate([200,100,200,100,200]);} return;}
+          b.textContent='⏱ '+fmt(rem);}
+        tick(); W.setInterval(tick,250);
+      }
+      // Backend-Zeiten in Singleton setzen
+      var newStart = """ + str(start_ms) + """;
+      var newEnd   = """ + str(end_ms) + """;
+      if (newEnd > 0) { W.gxTimer.tStart = newStart; W.gxTimer.tEnd = newEnd; W.gxTimer.done=false; }
+    })();
+    </script>
+    """
+    st.components.v1.html(html, height=1)
+
+render_sticky_timer()  # <-- jetzt IMMER sichtbar, direkt ab Start
+
+# ------------------------- PLAN & EXERCISE POOL -------------------------
 PLAN = {
     "A": [
         ("Schrägbankdrücken KH/LH", 6, 10, 2.5, "main"),
@@ -29,39 +101,17 @@ PLAN = {
         ("Face Pulls Kabel",        12, 15, 0.5, "prehab")
     ]
 }
-
-# Optionaler Übungspool für Tausch (einfach erweiterbar)
 EXERCISE_POOL = sorted(list({
     n for day in PLAN.values() for (n, *_ ) in day
 }.union({
-    # Beispiele für Alternativen:
-    "Brustpresse Maschine", "Dips", "Butterfly Maschine",
-    "Latzug breit", "Klimmzug (assistiert)", "T-Bar Rudern",
-    "Ausfallschritte", "Beinstrecker", "Beinbeuger sitzend",
-    "Face Pulls Kabel", "Seitheben KH", "Overhead-Press LH"
+    "Brustpresse Maschine","Dips","Butterfly Maschine",
+    "Latzug breit","Klimmzug (assistiert)","T-Bar Rudern",
+    "Ausfallschritte","Beinbeuger sitzend","Seitheben KH","Overhead-Press LH"
 })))
 
 SETS_MAIN = 3
 SETS_ISO  = 2
 CSV_PATH  = "workout_log.csv"
-
-# ------------------------- SESSION STATE -------------------------
-if "timer_start" not in st.session_state: st.session_state["timer_start"] = None
-if "timer_end" not in st.session_state:   st.session_state["timer_end"]   = None
-if "auto_timer_seconds" not in st.session_state: st.session_state["auto_timer_seconds"] = 90
-if "saved_flags" not in st.session_state: st.session_state["saved_flags"] = {}
-if "chosen_map" not in st.session_state:  st.session_state["chosen_map"]  = {}  # key: (tag, idx, date) -> chosen_name
-if "autopilot" not in st.session_state:   st.session_state["autopilot"]   = False
-if "focus_anchor" not in st.session_state:st.session_state["focus_anchor"]= ""  # zu welchem Element scrollen
-
-# Tageswechsel -> Haken leeren
-if "current_date" not in st.session_state:
-    st.session_state["current_date"] = date.today().isoformat()
-if st.session_state["current_date"] != date.today().isoformat():
-    st.session_state["current_date"] = date.today().isoformat()
-    st.session_state["saved_flags"].clear()
-    st.session_state["chosen_map"].clear()
-    st.session_state["focus_anchor"] = ""
 
 # ------------------------- STORAGE HELPERS -------------------------
 def load_log() -> pd.DataFrame:
@@ -96,16 +146,7 @@ def last_unit(df: pd.DataFrame, tag: str, ex_name: str):
     return d, sub[sub["date"] == d]
 
 def suggest_target(df: pd.DataFrame, tag: str, ex_name: str, fallback_meta=None):
-    """
-    Coach-Logik (dynamisch): nutzt letzte Einheit (Reps + RPE).
-    Wenn ex_name NICHT im PLAN existiert (getauscht), nutzt fallback_meta (lr,hr,inc,tp).
-    Regeln:
-      1) Alle Sätze >= hr UND max RPE <= 9.0  -> Gewicht + inc
-      2) max RPE >= 9.5 und nicht am oberen Limit -> Gewicht halten (erst Reps nachziehen)
-      3) Viele Sätze < lr -> Gewicht halten (optional leicht runter)
-      4) Sonst: Reps steigern (+1/Satz) bis hr erreicht ist
-    """
-    # Range/Inc/Typ ermitteln
+    # Range/Inc/Typ ermitteln (bei Tausch fallbacks nutzen)
     lr = hr = inc = None
     tp = "main"
     found = False
@@ -118,7 +159,6 @@ def suggest_target(df: pd.DataFrame, tag: str, ex_name: str, fallback_meta=None)
         if fallback_meta is not None:
             lr, hr, inc, tp = fallback_meta
         else:
-            # Fallback konservativ
             lr, hr, inc, tp = 8, 12, 2.5, "main"
 
     hist_date, unit = last_unit(df, tag, ex_name)
@@ -193,57 +233,6 @@ def undo_last_set_today(tag: str, name: str):
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
 
-# ------------------------- STICKY TIMER (Singleton + Blink) -------------------------
-def render_sticky_timer():
-    start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
-    end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
-    html = f"""
-    <script>
-    (function(){{
-      var W = window.parent || window, D = W.document;
-      if (!W.gxTimer) {{
-        W.gxTimer = {{
-          tStart:0, tEnd:0, done:false, badge:null,
-          start:function(s){{var n=Date.now();this.tStart=n;this.tEnd=n+s*1000;this.done=false;}},
-          stop:function(){{this.tStart=0;this.tEnd=0;this.done=true;if(this.badge) this.badge.textContent='⏱ 0s';}},
-          shift:function(ms){{if(!this.tEnd) return; this.tEnd=Math.max(Date.now(), this.tEnd+ms);}},
-          blink:function(){{
-            var old=D.getElementById('gx-flash-overlay'); if(old&&old.parentNode) old.parentNode.removeChild(old);
-            var ov=D.createElement('div'); ov.id='gx-flash-overlay';
-            ov.style.cssText='position:fixed;inset:0;background:#00c853;opacity:0;pointer-events:none;z-index:2147483647;transition:opacity 120ms ease';
-            D.body.appendChild(ov); void ov.offsetHeight;
-            var f=0,intv=setInterval(function(){{ov.style.opacity=(f%2===0)?'0.65':'0';f++;if(f>=10){{clearInterval(intv);if(ov&&ov.parentNode)ov.parentNode.removeChild(ov);}}}},500);
-          }},
-          beep:function(){{
-            try{{var ctx=new (W.AudioContext||W.webkitAudioContext)(),o=ctx.createOscillator(),g=ctx.createGain();
-            o.type='sine';o.frequency.value=880;o.connect(g);g.connect(ctx.destination);
-            g.gain.setValueAtTime(0.0001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.5,ctx.currentTime+0.02);
-            g.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+0.35);o.start();o.stop(ctx.currentTime+0.37);}}catch(e){{}}
-          }}
-        }};
-        var p=D.createElement('div'); p.id='gx-timer-panel'; p.style.cssText='position:fixed;right:16px;top:16px;z-index:2147483647;display:flex;gap:8px;align-items:center';
-        var b=D.createElement('div'); b.id='gx-timer-badge'; b.textContent='⏱ 0s'; b.style.cssText='background:rgba(20,20,20,.92);color:#fff;padding:8px 12px;border-radius:12px;font-size:18px;font-weight:800;border:1px solid rgba(255,255,255,.08);box-shadow:0 8px 24px rgba(0,0,0,.35)';
-        W.gxTimer.badge=b;
-        function mk(id,lab){{var x=D.createElement('button');x.id=id;x.textContent=lab;x.style.cssText='font-size:12px;font-weight:800;line-height:1;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.15);background:rgba(32,32,32,.95);color:#fff;cursor:pointer';return x;}}
-        var s60=mk('gx60','60s'),s90=mk('gx90','90s'),s120=mk('gx120','120s'),m5=mk('gxm5','−5s'),p5=mk('gxp5','+5s'),stp=mk('gxstp','Stop');
-        [s60,s90,s120,m5,p5,stp].forEach(e=>e.onmousedown=()=>e.style.transform='translateY(1px)');
-        [s60,s90,s120,m5,p5,stp].forEach(e=>e.onmouseup=()=>e.style.transform='');
-        p.appendChild(b); p.appendChild(s60); p.appendChild(s90); p.appendChild(s120); p.appendChild(m5); p.appendChild(p5); p.appendChild(stp); D.body.appendChild(p);
-        s60.onclick=function(){{W.gxTimer.start(60)}}; s90.onclick=function(){{W.gxTimer.start(90)}}; s120.onclick=function(){{W.gxTimer.start(120)}};
-        m5.onclick=function(){{W.gxTimer.shift(-5000)}}; p5.onclick=function(){{W.gxTimer.shift(5000)}}; stp.onclick=function(){{W.gxTimer.stop()}};
-        function fmt(s){{if(s<60)return s+'s';var m=Math.floor(s/60),x=s%60;return m+':' + (x<10?('0'+x):x);}}
-        function tick(){{var e=W.gxTimer.tEnd;if(!e){{b.textContent='⏱ 0s';return;}} var rem=Math.floor((e-Date.now())/1000);
-          if(rem<=0){{b.textContent='⏱ 0s'; if(!W.gxTimer.done){{W.gxTimer.done=true;W.gxTimer.blink();W.gxTimer.beep(); if(W.navigator&&W.navigator.vibrate)W.navigator.vibrate([200,100,200,100,200]);}} return;}}
-          b.textContent='⏱ '+fmt(rem);}}
-        tick(); W.setInterval(tick,250);
-      }}
-      var ns={start_ms:=start_ms, end_ms:={end_ms}};
-      if (ns.end_ms>0){{ W.gxTimer.tStart = ns.start_ms; W.gxTimer.tEnd = ns.end_ms; W.gxTimer.done=false; }}
-    }})();
-    </script>
-    """
-    st.components.v1.html(html, height=1)
-
 # ------------------------- SIDEBAR -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
@@ -252,9 +241,8 @@ with st.sidebar:
     deload_every = st.slider("Deload alle X Wochen", 6, 10, 8)
     deload_drop = st.slider("Deload: Gewichtsreduzierung (%)", 20, 45, 35)
     st.session_state["auto_timer_seconds"] = st.selectbox("Auto-Pause nach ✅", [0,60,90,120], index=2)
-    st.caption("RPE: 8 ≈ 2 RR · 9 ≈ 1 RR · 10 = Versagen.")
-    st.markdown("---")
     st.toggle("🧭 Autopilot (Satz→Satz springen)", key="autopilot")
+    st.caption("RPE: 8 ≈ 2 RR · 9 ≈ 1 RR · 10 = Versagen.")
     st.markdown("---")
     st.subheader("📤 CSV importieren")
     uploaded = st.file_uploader("Vorherige workout_log.csv auswählen", type=["csv"])
@@ -311,7 +299,7 @@ st.caption(f"Heute erledigt: **{done_today}/{target_today} Sätze**")
 
 # ------------------------- PRO ÜBUNG -------------------------
 for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
-    # --- Übung heute wählen (Tausch möglich) ---
+    # Übung heute wählen (Tausch möglich)
     choose_key = (tag, i, today_str)
     default_name = st.session_state["chosen_map"].get(choose_key, orig_name)
     chosen_name = st.selectbox(f"Übung {i} heute:", EXERCISE_POOL,
@@ -319,23 +307,22 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
                                key=f"choose_{tag}_{i}_{today_str}")
     st.session_state["chosen_map"][choose_key] = chosen_name
 
-    # Coach-Empfehlung (nutzt bei Tausch die Range des Originals als Fallback)
+    # Coach-Empfehlung (bei Tausch Range des Originals als Fallback)
     sug = suggest_target(df, tag, chosen_name, fallback_meta=(lr,hr,inc,tp))
 
-    # Wie viele Sätze sind heute zu machen?
+    # Wie viele Sätze heute?
     target_sets = sets_target(tp)
 
-    # Gespeicherte Sätze heute (für Farbe & Defaults)
+    # Heutige Sätze (für Farbe & Defaults)
     today_sets = df[(df["date"]==today_str) & (df["tag"]==tag) & (df["exercise"]==chosen_name)]
     saved_count = 0 if today_sets.empty else int(today_sets["set"].max())
 
     # Box-Farbe
-    if saved_count == 0:         box_bg = "#2b2b2b"
+    if saved_count == 0:            box_bg = "#2b2b2b"
     elif saved_count < target_sets: box_bg = "#3a3a1d"
-    elif saved_count == target_sets: box_bg = "#1d3a1d"
-    else:                         box_bg = "#144d14"
+    elif saved_count == target_sets:box_bg = "#1d3a1d"
+    else:                           box_bg = "#144d14"
 
-    # Kopf/Kasten
     st.markdown(
         f"""
         <div style="background:{box_bg};padding:12px;border-radius:10px;color:#fff;line-height:1.35;border:1px solid rgba(255,255,255,0.08)" id="ex_{i}">
@@ -347,7 +334,7 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         unsafe_allow_html=True
     )
 
-    # Standardvorschlag aus letzter Einheit (für Defaults)
+    # Defaults aus letzter Einheit
     _, last_u = last_unit(df, tag, chosen_name)
     last_weight = float(last_u["weight"].max()) if (last_u is not None and not last_u.empty) else 0.0
     base_w = float(sug.get("base", last_weight))
@@ -388,7 +375,7 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             append_row({
                 "date": today_str,
                 "tag": tag,
-                "exercise": chosen_name,  # echte (ggf. getauschte) Übung in CSV
+                "exercise": chosen_name,  # echte (ggf. getauschte) Übung
                 "set": set_number,
                 "weight": float(w),
                 "reps": int(r),
@@ -397,18 +384,17 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             })
             st.session_state["saved_flags"][flag_key] = True
 
-            # Auto-Pause
+            # Auto-Pause nach ✅
             secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
                 st.session_state["timer_start"] = datetime.utcnow()
                 st.session_state["timer_end"]   = st.session_state["timer_start"] + timedelta(seconds=secs)
 
-            # Autopilot: nächstes Ziel setzen
+            # Autopilot: nächste Ziel-Position
             if st.session_state["autopilot"]:
                 if s < target_sets:
                     st.session_state["focus_anchor"] = f"a_{tag}_{i}_{s+1}"
                 else:
-                    # nächste Übung, Satz 1
                     st.session_state["focus_anchor"] = f"ex_{i+1}" if i < len(PLAN[tag]) else ""
             df = load_log()
             st.rerun()
@@ -426,9 +412,6 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
                 st.session_state.pop(k, None)
         st.info("Heutige Eingaben zurückgesetzt.")
         st.rerun()
-
-# ------------------------- STICKY TIMER RENDER -------------------------
-render_sticky_timer()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
 st.markdown("---")
