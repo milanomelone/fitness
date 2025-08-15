@@ -131,126 +131,169 @@ def undo_last_set_today(tag: str, name: str):
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
 
-# ------------------------- STICKY TIMER (Floating Panel + Fullscreen Blink) -------------------------
+# ------------------------- STICKY TIMER (Parent-DOM, Fullscreen Blink) -------------------------
 def render_sticky_timer():
     """
-    - Schwebendes Panel oben rechts (Start 60/90/120, Stop, −5/+5)
-    - Countdown oben rechts (sticky)
-    - Vollbild-Blinken ~5s bei Ablauf + Ton + Vibration
-    - Clientseitiges JS; Variablen werden ohne f-String-Platzhalter injiziert (kein {}-Problem)
+    Sticky-Timer oben rechts über die GANZE Seite:
+    - Panel & Overlay werden in window.parent.document injiziert (nicht im iFrame)
+    - Start 60/90/120, Stop, −5/+5
+    - Vollbild-Blinken ~5s + Ton + Vibration bei Ablauf
     """
     start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
     end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
 
     html = """
-    <style>
-      #timer-panel {
-        position: fixed; right: 16px; top: 16px;
-        display: flex; align-items: center; gap: 8px;
-        z-index: 9999;
-      }
-      #timer-badge {
-        background: rgba(20,20,20,.92); color: #fff;
-        padding: 8px 12px; border-radius: 12px;
-        font-size: 18px; font-weight: 800;
-        border: 1px solid rgba(255,255,255,.08);
-        box-shadow: 0 8px 24px rgba(0,0,0,.35);
-        -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
-      }
-      .tp-btn {
-        font-size: 12px; font-weight: 800; line-height: 1;
-        padding: 8px 10px; border-radius: 10px;
-        border: 1px solid rgba(255,255,255,.15);
-        background: rgba(32,32,32,.95); color: #fff; cursor: pointer;
-        user-select: none;
-      }
-      .tp-btn:active { transform: translateY(1px); }
-
-      @keyframes flashGreen {
-        0% { opacity: 0; } 25% { opacity: .6; } 50% { opacity: 0; }
-        75% { opacity: .6; } 100% { opacity: 0; }
-      }
-      .flash-overlay {
-        position: fixed; inset: 0; background: #00c853;
-        z-index: 9998; pointer-events: none;
-        animation: flashGreen 1s ease-in-out 5; /* ~5 Sekunden */
-      }
-    </style>
-
-    <div id="timer-panel">
-      <div id="timer-badge">⏱ 0s</div>
-      <button class="tp-btn" id="t60">60s</button>
-      <button class="tp-btn" id="t90">90s</button>
-      <button class="tp-btn" id="t120">120s</button>
-      <button class="tp-btn" id="tminus">−5s</button>
-      <button class="tp-btn" id="tplus">+5s</button>
-      <button class="tp-btn" id="tstop">Stop</button>
-    </div>
-
     <script>
-      var tStart = """ + str(start_ms) + """;
-      var tEnd   = """ + str(end_ms) + """;
-      var badge  = document.getElementById('timer-badge');
-      var done   = false;
+      (function(){
+        var pdoc = window.parent && window.parent.document ? window.parent.document : document;
 
-      function fmt(sec){
-        if (sec < 60) return sec + 's';
-        var m = Math.floor(sec/60), s = sec % 60;
-        return m + ':' + (s<10?('0'+s):s);
-      }
-      function beep(){
-        try {
-          var ctx = new (window.AudioContext || window.webkitAudioContext)();
-          var o = ctx.createOscillator(); var g = ctx.createGain();
-          o.type = 'sine'; o.frequency.value = 880;
-          o.connect(g); g.connect(ctx.destination);
-          g.gain.setValueAtTime(0.0001, ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
-          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-          o.start(); o.stop(ctx.currentTime + 0.37);
-        } catch(e) {}
-      }
-      function fullBlink(){
-        var ov = document.createElement('div');
-        ov.className = 'flash-overlay';
-        document.body.appendChild(ov);
-        setTimeout(()=>{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }, 5200);
-      }
-      function startTimer(seconds){
-        var now = Date.now();
-        tStart = now;
-        tEnd   = now + seconds*1000;
-        done   = false;
-      }
-      function stopTimer(){
-        tStart = 0; tEnd = 0; done = true;
-        badge.textContent = '⏱ 0s';
-      }
-      function shiftTimer(ms){
-        if (!tEnd) return;
-        tEnd = Math.max(Date.now(), tEnd + ms);
-      }
-      // Buttons (clientseitig)
-      document.getElementById('t60').addEventListener('click', ()=>startTimer(60));
-      document.getElementById('t90').addEventListener('click', ()=>startTimer(90));
-      document.getElementById('t120').addEventListener('click',()=>startTimer(120));
-      document.getElementById('tminus').addEventListener('click',()=>shiftTimer(-5000));
-      document.getElementById('tplus').addEventListener('click', ()=>shiftTimer(+5000));
-      document.getElementById('tstop').addEventListener('click', stopTimer);
+        // Falls schon vorhanden -> nicht doppelt anlegen
+        if (!pdoc.getElementById('gx-timer-panel')) {
+          // Panel-Container (oben rechts, maximaler z-index)
+          var panel = pdoc.createElement('div');
+          panel.id = 'gx-timer-panel';
+          panel.style.cssText = [
+            'position:fixed','right:16px','top:16px',
+            'z-index:2147483647','display:flex','align-items:center','gap:8px'
+          ].join(';');
 
-      function tick(){
-        if (!tEnd || tEnd <= Date.now()){
+          // Badge
+          var badge = pdoc.createElement('div');
+          badge.id = 'gx-timer-badge';
           badge.textContent = '⏱ 0s';
-          return;
+          badge.style.cssText = [
+            'background:rgba(20,20,20,.92)','color:#fff','padding:8px 12px',
+            'border-radius:12px','font-size:18px','font-weight:800',
+            'border:1px solid rgba(255,255,255,.08)',
+            'box-shadow:0 8px 24px rgba(0,0,0,.35)',
+            '-webkit-backdrop-filter:blur(4px)','backdrop-filter:blur(4px)'
+          ].join(';');
+
+          function mkBtn(id, label){
+            var b = pdoc.createElement('button');
+            b.id = id; b.textContent = label;
+            b.style.cssText = [
+              'font-size:12px','font-weight:800','line-height:1',
+              'padding:8px 10px','border-radius:10px',
+              'border:1px solid rgba(255,255,255,.15)',
+              'background:rgba(32,32,32,.95)','color:#fff','cursor:pointer',
+              'user-select:none'
+            ].join(';');
+            b.onmousedown = function(){ b.style.transform = 'translateY(1px)'; };
+            b.onmouseup   = function(){ b.style.transform = ''; };
+            return b;
+          }
+
+          var b60   = mkBtn('gx-t60','60s');
+          var b90   = mkBtn('gx-t90','90s');
+          var b120  = mkBtn('gx-t120','120s');
+          var bM5   = mkBtn('gx-tminus','−5s');
+          var bP5   = mkBtn('gx-tplus','+5s');
+          var bStop = mkBtn('gx-tstop','Stop');
+
+          panel.appendChild(badge);
+          panel.appendChild(b60);
+          panel.appendChild(b90);
+          panel.appendChild(b120);
+          panel.appendChild(bM5);
+          panel.appendChild(bP5);
+          panel.appendChild(bStop);
+
+          pdoc.body.appendChild(panel);
+
+          // Vollbild-Blinken (5s)
+          function fullBlink(){
+            var ov = pdoc.createElement('div');
+            ov.id = 'gx-flash-overlay';
+            ov.style.cssText = [
+              'position:fixed','inset:0','background:#00c853',
+              'z-index:2147483646','pointer-events:none','opacity:0'
+            ].join(';');
+
+            pdoc.body.appendChild(ov);
+
+            var flashes = 0;
+            var intv = setInterval(function(){
+              ov.style.opacity = (flashes % 2 === 0) ? '0.6' : '0';
+              flashes++;
+              if (flashes >= 10){
+                clearInterval(intv);
+                if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+              }
+            }, 500);
+          }
+
+          function beep(){
+            try {
+              var ctx = new (window.parent.AudioContext || window.parent.webkitAudioContext)();
+              var o = ctx.createOscillator(); var g = ctx.createGain();
+              o.type = 'sine'; o.frequency.value = 880;
+              o.connect(g); g.connect(ctx.destination);
+              g.gain.setValueAtTime(0.0001, ctx.currentTime);
+              g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
+              g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+              o.start(); o.stop(ctx.currentTime + 0.37);
+            } catch(e) {}
+          }
+
+          // Timer-State
+          var tStart = """ + str(start_ms) + """;
+          var tEnd   = """ + str(end_ms) + """;
+          var done   = false;
+
+          function fmt(sec){
+            if (sec < 60) return sec + 's';
+            var m = Math.floor(sec/60), s = sec % 60;
+            return m + ':' + (s<10?('0'+s):s);
+          }
+          function startTimer(seconds){
+            var now = Date.now();
+            tStart = now; tEnd = now + seconds*1000; done = false;
+          }
+          function stopTimer(){
+            tStart = 0; tEnd = 0; done = true;
+            badge.textContent = '⏱ 0s';
+          }
+          function shiftTimer(ms){
+            if (!tEnd) return;
+            tEnd = Math.max(Date.now(), tEnd + ms);
+          }
+
+          // Buttons
+          b60.addEventListener('click',  function(){ startTimer(60);  });
+          b90.addEventListener('click',  function(){ startTimer(90);  });
+          b120.addEventListener('click', function(){ startTimer(120); });
+          bM5.addEventListener('click',  function(){ shiftTimer(-5000); });
+          bP5.addEventListener('click',  function(){ shiftTimer(+5000); });
+          bStop.addEventListener('click', function(){ stopTimer(); });
+
+          function tick(){
+            if (!tEnd || tEnd <= Date.now()){
+              badge.textContent = '⏱ 0s';
+              return;
+            }
+            var rem = Math.max(0, Math.floor((tEnd - Date.now())/1000));
+            badge.textContent = '⏱ ' + fmt(rem);
+            if (rem === 0 && !done){
+              done = true;
+              fullBlink(); beep();
+              if (window.parent && window.parent.navigator && window.parent.navigator.vibrate) {
+                window.parent.navigator.vibrate([200,100,200,100,200]);
+              }
+            }
+          }
+          tick();
+          window.setInterval(tick, 250);
         }
-        var rem = Math.max(0, Math.floor((tEnd - Date.now())/1000));
-        badge.textContent = '⏱ ' + fmt(rem);
-        if (rem === 0 && !done){
-          done = true;
-          fullBlink(); beep(); if (navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
+
+        // Panel existiert bereits? -> Start/Ende aktualisieren (z.B. nach ✅ Auto-Start)
+        var panelNow = pdoc.getElementById('gx-timer-panel');
+        if (panelNow){
+          panelNow.setAttribute('data-gx-start', '""" + str(start_ms) + """');
+          panelNow.setAttribute('data-gx-end',   '""" + str(end_ms) + """');
+          // OPTION: Wenn du willst, könntest du hier aus data-Attr lesen und den laufenden Timer syncen
         }
-      }
-      tick(); setInterval(tick, 250);
+      })();
     </script>
     """
     st.components.v1.html(html, height=0)
@@ -301,7 +344,7 @@ if flag:
     reason = "Kalender" if meta["time"] else ""
     if meta["fatigue"]:
         reason += (" & " if reason else "") + f"Leistungsabfall ({meta['slips']})"
-    st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50%, 3–4 Wdh. in Reserve.")
+    st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50 %, 3–4 Wdh. in Reserve.")
 
 # ------------------------- TAGES-FORTSCHRITT -------------------------
 today_str = date.today().isoformat()
@@ -398,7 +441,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             })
             st.session_state["saved_flags"][flag_key] = True
 
-            # Auto-Pause nach ✅ (Backend setzt Start/Ende; JS liest beim nächsten Render)
+            # Auto-Pause nach ✅
             secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
                 st.session_state["timer_start"] = datetime.utcnow()
