@@ -36,13 +36,13 @@ CSV_PATH  = "workout_log.csv"
 
 # ------------------------- SESSION STATE -------------------------
 if "set_buffer" not in st.session_state:
-    st.session_state["set_buffer"] = {}  # key: f"{tag}:{exercise}"
+    st.session_state["set_buffer"] = {}          # key: f"{tag}:{exercise}"
 if "timer_end" not in st.session_state:
     st.session_state["timer_end"] = None
 if "auto_timer_seconds" not in st.session_state:
-    st.session_state["auto_timer_seconds"] = 90  # Default Auto-Pausenlänge
+    st.session_state["auto_timer_seconds"] = 90   # Auto-Pause nach Speichern
 
-# ------------------------- HELPERS: STORAGE -------------------------
+# ------------------------- STORAGE HELPERS -------------------------
 def load_log() -> pd.DataFrame:
     cols = ["date","tag","exercise","set","weight","reps","rpe","note"]
     if os.path.exists(CSV_PATH):
@@ -63,7 +63,7 @@ def append_row(row: dict):
     df.loc[len(df)] = row
     save_log(df)
 
-# ------------------------- HELPERS: TRAINING LOGIC -------------------------
+# ------------------------- TRAINING LOGIC -------------------------
 def sets_target(tp: str) -> int:
     return SETS_MAIN if tp == "main" else SETS_ISO
 
@@ -115,11 +115,6 @@ def needs_deload(df: pd.DataFrame, block_start: date, every_weeks: int = 8, slip
                 slips += 1
     fatigue_flag = (slips >= slip_tol)
     return (time_flag or fatigue_flag), {"time": time_flag, "fatigue": fatigue_flag, "slips": slips}
-
-def ex_type(tag: str, ex_name: str) -> str:
-    for n, lr, hr, inc, tp in PLAN[tag]:
-        if n == ex_name: return tp
-    return "main"
 
 def undo_last_set_today(tag: str, name: str):
     dfx = load_log()
@@ -181,10 +176,9 @@ if flag:
     st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50%, 3–4 Wdh. in Reserve.")
 
 # ------------------------- TAGES-FORTSCHRITT -------------------------
-today_tag_plan = PLAN[tag]
-target_today = sum(SETS_MAIN if tp=="main" else SETS_ISO for (_,_,_,_,tp) in today_tag_plan)
-today_str = date.today().isoformat()
-done_today = len(df[(df["date"] == today_str) & (df["tag"] == tag)])
+today_plan = PLAN[tag]
+target_today = sum(SETS_MAIN if tp=="main" else SETS_ISO for (_,_,_,_,tp) in today_plan)
+done_today = len(df[(df["date"] == date.today().isoformat()) & (df["tag"] == tag)])
 st.progress(min(done_today/target_today, 1.0))
 st.caption(f"Heute erledigt: **{done_today}/{target_today} Sätze**")
 
@@ -195,28 +189,42 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     if buffer_key not in st.session_state["set_buffer"]:
         st.session_state["set_buffer"][buffer_key] = []
 
-    target_sets = sets_target(sug.get("tp", tp))
+    target_sets = SETS_MAIN if sug.get("tp", tp) == "main" else SETS_ISO
     current_sets = len(st.session_state["set_buffer"][buffer_key])
 
-    # Hintergrundfarbe nach Fortschritt
+    # --------- DARK-MODE-FARBEN + BOX -------------
     if current_sets == 0:
-        box_color = "#f6f6f6"
+        box_bg = "#2b2b2b"    # dunkelgrau
     elif current_sets < target_sets:
-        box_color = "#fff3cd"
+        box_bg = "#3a3a1d"    # gelblich-dunkel (in Arbeit)
     elif current_sets == target_sets:
-        box_color = "#d4edda"
+        box_bg = "#1d3a1d"    # dunkelgrün (fertig)
     else:
-        box_color = "#c3e6cb"
+        box_bg = "#144d14"    # kräftigeres Grün (über Soll)
 
     st.markdown(
-        f"<div style='background-color:{box_color}; padding:12px; border-radius:10px;'>"
-        f"<div style='font-weight:700; font-size:18px;'>{i}. {name} · Ziel {lr}–{hr} Wdh.</div>"
-        f"<div style='opacity:0.8;'>Coach: {sug['msg']}</div>"
-        f"</div>",
+        f"""
+        <div style="
+            background-color:{box_bg};
+            padding:12px; border-radius:10px;
+            color:#ffffff; line-height:1.35;
+            border:1px solid rgba(255,255,255,0.08);
+        ">
+          <div style="font-weight:700; font-size:18px;">
+            {i}. {name} · Ziel {lr}–{hr} Wdh.
+          </div>
+          <div style="opacity:0.95;">
+            <b>Coach:</b> {sug['msg']}
+          </div>
+          <div style="opacity:0.8; font-size:13px; margin-top:4px;">
+            Geplante Sätze im Buffer: {current_sets}/{target_sets}
+          </div>
+        </div>
+        """,
         unsafe_allow_html=True
     )
 
-    # Defaults
+    # Defaults für Inputs
     _, last_u = last_unit(df, tag, name)
     default_w = float(last_u["weight"].max()) if (last_u is not None and not last_u.empty) else 0.0
     base_w = float(sug.get("base", default_w))
@@ -232,9 +240,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         st.session_state["set_buffer"][buffer_key].append({"weight": float(w), "reps": int(r), "rpe": float(rpe)})
         st.success(f"Satz geplant: {w:.1f} kg × {int(r)} (RPE {rpe})")
 
-    st.caption(f"Geplante Sätze im Buffer: {current_sets}/{target_sets}")
-
-    # Geplante Sätze + Bearbeiten/Löschen
+    # Geplante Sätze + Edit/Löschen
     if current_sets > 0:
         for idx_buf, row in enumerate(st.session_state["set_buffer"][buffer_key]):
             cc1, cc2, cc3, cc4, cc5 = st.columns([1.0, 0.9, 0.9, 0.9, 0.8])
@@ -313,13 +319,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# >>> UPDATED: Auto-Refresh mit neuer API
+# Auto-Refresh mit neuer API; bei Ablauf kurzer Beep + Vibration
 if st.session_state["timer_end"]:
-    # kleine Query-Param-Änderung → Streamlit rendert neu
-    st.query_params["_"] = datetime.utcnow().timestamp()
+    st.query_params["_"] = datetime.utcnow().timestamp()  # kleiner Param-Wechsel -> Re-Render
     st.rerun()
 else:
-    # Beep & Vibration einmal nach Ablauf
     st.components.v1.html("""
     <audio id="beep" autoplay>
       <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
@@ -338,6 +342,7 @@ with st.expander("📒 Letzte 30 Einträge"):
     else:
         st.dataframe(hist.tail(30), use_container_width=True)
 
+# CSV-Export
 hist = load_log()
 csv_bytes = hist.to_csv(index=False).encode("utf-8")
 st.download_button(
