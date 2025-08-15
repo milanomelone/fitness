@@ -181,16 +181,10 @@ if flag:
     st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50%, 3–4 Wdh. in Reserve.")
 
 # ------------------------- TAGES-FORTSCHRITT -------------------------
-# Ziel-Sätze (heute) = Summe der Ziel-Sätze aus Tag A/B
 today_tag_plan = PLAN[tag]
 target_today = sum(SETS_MAIN if tp=="main" else SETS_ISO for (_,_,_,_,tp) in today_tag_plan)
-done_today = 0
 today_str = date.today().isoformat()
-logged_today = df[df["date"] == today_str]
-for _, _, _, _, tp in today_tag_plan:
-    pass
-done_today = len(logged_today[(logged_today["tag"]==tag)])
-
+done_today = len(df[(df["date"] == today_str) & (df["tag"] == tag)])
 st.progress(min(done_today/target_today, 1.0))
 st.caption(f"Heute erledigt: **{done_today}/{target_today} Sätze**")
 
@@ -201,19 +195,18 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     if buffer_key not in st.session_state["set_buffer"]:
         st.session_state["set_buffer"][buffer_key] = []
 
-    # Ziel/Status
     target_sets = sets_target(sug.get("tp", tp))
     current_sets = len(st.session_state["set_buffer"][buffer_key])
 
     # Hintergrundfarbe nach Fortschritt
     if current_sets == 0:
-        box_color = "#f6f6f6"       # grau
+        box_color = "#f6f6f6"
     elif current_sets < target_sets:
-        box_color = "#fff3cd"       # gelb
+        box_color = "#fff3cd"
     elif current_sets == target_sets:
-        box_color = "#d4edda"       # grün
+        box_color = "#d4edda"
     else:
-        box_color = "#c3e6cb"       # noch grüner (overachieve)
+        box_color = "#c3e6cb"
 
     st.markdown(
         f"<div style='background-color:{box_color}; padding:12px; border-radius:10px;'>"
@@ -246,7 +239,6 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         for idx_buf, row in enumerate(st.session_state["set_buffer"][buffer_key]):
             cc1, cc2, cc3, cc4, cc5 = st.columns([1.0, 0.9, 0.9, 0.9, 0.8])
             cc1.markdown(f"**Satz {idx_buf+1}**")
-            # kleine Edit-Felder
             row["weight"] = cc2.number_input("kg", min_value=0.0, step=0.5, value=row["weight"], key=f"eb_w_{buffer_key}_{idx_buf}")
             row["reps"]   = cc3.number_input("Wdh", min_value=0, step=1, value=row["reps"], key=f"eb_r_{buffer_key}_{idx_buf}")
             row["rpe"]    = cc4.slider("RPE", 5.0, 10.0, float(row["rpe"]), 0.5, key=f"eb_rpe_{buffer_key}_{idx_buf}")
@@ -266,7 +258,6 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             sub_today = df[(df["tag"] == tag) & (df["exercise"] == name) & (df["date"] == today)]
             next_set = 1 if sub_today.empty else int(sub_today["set"].max()) + 1
 
-            # persistieren
             for k, row in enumerate(st.session_state["set_buffer"][buffer_key]):
                 append_row({
                     "date": today,
@@ -279,19 +270,16 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
                     "note": ""
                 })
 
-            # Buffer leeren, df aktualisieren
             st.session_state["set_buffer"][buffer_key] = []
             df = load_log()
             st.success("Sätze gespeichert.")
 
-            # Auto-Pause starten (falls eingestellt)
             secs = int(st.session_state["auto_timer_seconds"])
             if secs > 0:
                 st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=secs)
 
             st.rerun()
 
-        # Undo-Button
         if st.button("↩️ Letzten gespeicherten Satz von heute zurücknehmen", key=f"undo_{buffer_key}"):
             undo_last_set_today(tag, name)
             df = load_log()
@@ -325,13 +313,13 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Auto-Refresh / Beep & Vibration bei 0
+# >>> UPDATED: Auto-Refresh mit neuer API
 if st.session_state["timer_end"]:
-    # State-Änderung erzwingen für Auto-Update
-    st.experimental_set_query_params(_=datetime.utcnow().timestamp())
-    st.experimental_rerun()
+    # kleine Query-Param-Änderung → Streamlit rendert neu
+    st.query_params["_"] = datetime.utcnow().timestamp()
+    st.rerun()
 else:
-    # Beep einmal pro Ablauf
+    # Beep & Vibration einmal nach Ablauf
     st.components.v1.html("""
     <audio id="beep" autoplay>
       <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
@@ -350,7 +338,6 @@ with st.expander("📒 Letzte 30 Einträge"):
     else:
         st.dataframe(hist.tail(30), use_container_width=True)
 
-# CSV-Export (Download)
 hist = load_log()
 csv_bytes = hist.to_csv(index=False).encode("utf-8")
 st.download_button(
