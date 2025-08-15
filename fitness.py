@@ -40,11 +40,7 @@ if "timer_end" not in st.session_state:
 if "auto_timer_seconds" not in st.session_state:
     st.session_state["auto_timer_seconds"] = 90  # Auto-Pause nach ✅
 if "saved_flags" not in st.session_state:
-    # Merkt pro Übung/Satz, ob heute bereits per ✅ gespeichert wurde
-    # key = f"{tag}:{exercise}:{date}:{setnr}" -> True/False
-    st.session_state["saved_flags"] = {}
-if "last_blink_ts" not in st.session_state:
-    st.session_state["last_blink_ts"] = 0.0  # verhindert mehrfaches Blinken
+    st.session_state["saved_flags"] = {}  # key: f"{tag}:{exercise}:{date}:{setnr}" -> bool
 
 # ------------------------- STORAGE HELPERS -------------------------
 def load_log() -> pd.DataFrame:
@@ -133,64 +129,90 @@ def undo_last_set_today(tag: str, name: str):
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
 
-# ------------------------- TIMER RENDERING -------------------------
-def render_sticky_timer_and_blink():
-    """Floating Timer + 3x grün blinken + Beep + Vibration am Ende."""
-    remaining = 0
+# ------------------------- CLIENT TIMER (JS-basiert) -------------------------
+def render_timers():
+    """
+    Floating Timer + Sidebar-Anzeige – komplett clientseitig (kein st.rerun nötig).
+    Bei Ablauf: 3x grünes Blinken, Ton, Vibration.
+    """
+    end_ts_ms = 0
     if st.session_state.get("timer_end"):
-        remaining = max(0, int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds()))
-        if remaining == 0:
-            st.session_state["timer_end"] = None
-            # Blink + Beep + Vibration (einmal pro Ablauf)
-            now_ts = datetime.utcnow().timestamp()
-            if now_ts - st.session_state.get("last_blink_ts", 0) > 0.8:
-                st.session_state["last_blink_ts"] = now_ts
-                st.components.v1.html("""
-                <style>
-                  @keyframes flashGreen {
-                    0%, 100% { opacity: 0; }
-                    50% { opacity: .6; }
-                  }
-                  .flash-overlay {
-                    position: fixed; inset: 0; background: #00c853; 
-                    z-index: 9998; pointer-events: none;
-                    animation: flashGreen 0.5s ease-in-out 3;
-                  }
-                </style>
-                <div class="flash-overlay"></div>
-                <audio autoplay>
-                  <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
-                </audio>
-                <script>
-                  if (navigator.vibrate) navigator.vibrate([160,80,160]);
-                  setTimeout(() => {
-                    const el = document.querySelector('.flash-overlay');
-                    if (el) el.remove();
-                  }, 1600);
-                </script>
-                """, height=0)
+        end_ts_ms = int(st.session_state["timer_end"].timestamp() * 1000)
 
-    # Floating Timer (immer sichtbar)
-    st.markdown(f"""
-    <div style="
+    # Sidebar-Anzeige (dynamisch)
+    with st.sidebar:
+        st.components.v1.html(f"""
+        <div id="sb-timer" style="text-align:center; font-size:32px; font-weight:800;">0s</div>
+        <script>
+          var endTs = {end_ts_ms};
+          function updSB(){{
+            if (!endTs) {{ document.getElementById('sb-timer').innerText = '0s'; return; }}
+            var rem = Math.max(0, Math.floor((endTs - Date.now())/1000));
+            document.getElementById('sb-timer').innerText = rem + 's';
+          }}
+          updSB(); setInterval(updSB, 1000);
+        </script>
+        """, height=40)
+
+    # Floating Timer + Blink/Beep/Vibrate
+    st.components.v1.html(f"""
+    <style>
+      @keyframes flashGreen {{
+        0%, 100% {{ opacity: 0; }}
+        50% {{ opacity: .6; }}
+      }}
+      .flash-overlay {{
+        position: fixed; inset: 0; background: #00c853;
+        z-index: 9998; pointer-events: none;
+        animation: flashGreen 0.5s ease-in-out 3;
+      }}
+      #timer-badge {{
         position: fixed; right: 16px; bottom: 16px;
         background: rgba(20,20,20,.92); color: #fff;
         padding: 10px 14px; border-radius: 12px;
         font-size: 24px; font-weight: 800; z-index: 9999;
-        box-shadow: 0 8px 24px rgba(0,0,0,.35);
         border: 1px solid rgba(255,255,255,.08);
+        box-shadow: 0 8px 24px rgba(0,0,0,.35);
         -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
-    ">
-      ⏱ {remaining}s
-    </div>
-    """, unsafe_allow_html=True)
+      }}
+    </style>
+    <div id="timer-badge">⏱ 0s</div>
+    <script>
+      var endTs = {end_ts_ms};
+      var badge = document.getElementById('timer-badge');
+      var done = false;
+      function beep(){{
+        try {{
+          var ctx = new (window.AudioContext || window.webkitAudioContext)();
+          var o = ctx.createOscillator(); var g = ctx.createGain();
+          o.type = 'sine'; o.frequency.value = 880;
+          o.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.0001, ctx.currentTime);
+          g.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+          o.start(); o.stop(ctx.currentTime + 0.27);
+        }} catch(e) {{}}
+      }}
+      function blink(){{
+        var ov = document.createElement('div');
+        ov.className = 'flash-overlay';
+        document.body.appendChild(ov);
+        setTimeout(()=>{{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }}, 1600);
+      }}
+      function upd(){{
+        if (!endTs) {{ badge.innerText = '⏱ 0s'; return; }}
+        var rem = Math.max(0, Math.floor((endTs - Date.now())/1000));
+        badge.textContent = '⏱ ' + rem + 's';
+        if (rem === 0 && !done) {{
+          done = true;
+          blink(); beep(); if (navigator.vibrate) navigator.vibrate([160,80,160]);
+        }}
+      }}
+      upd(); setInterval(upd, 1000);
+    </script>
+    """, height=0)
 
-    # Auto-Refresh jede Sekunde solange Timer läuft
-    if st.session_state.get("timer_end"):
-        st.query_params["_"] = datetime.utcnow().timestamp()
-        st.rerun()
-
-# ------------------------- SIDEBAR -------------------------
+# ------------------------- SIDEBAR (Settings + Timer-Buttons) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
     tag = st.selectbox("Trainingstag", ["A","B"])
@@ -198,7 +220,7 @@ with st.sidebar:
     deload_every = st.slider("Deload alle X Wochen", 6, 10, 8)
     deload_drop = st.slider("Deload: Gewichtsreduzierung (%)", 20, 45, 35)
     st.session_state["auto_timer_seconds"] = st.selectbox("Auto-Pause nach ✅", [0,60,90,120], index=2)
-    st.caption("RPE: 8 ≈ 2 Reps Reserve · 9 ≈ 1 RR · 10 = Versagen.")
+    st.caption("RPE: 8 ≈ 2 RR · 9 ≈ 1 RR · 10 = Versagen.")
 
     st.markdown("---")
     st.subheader("⏱️ Pausen-Timer")
@@ -207,14 +229,6 @@ with st.sidebar:
     if col[1].button("▶️ 90s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
     if col[2].button("▶️ 120s"): st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
     if col[3].button("⏹"):       st.session_state["timer_end"] = None
-
-    # Anzeige in der Sidebar
-    remaining_sidebar = 0
-    if st.session_state.get("timer_end"):
-        remaining_sidebar = max(0, int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds()))
-        if remaining_sidebar == 0:
-            st.session_state["timer_end"] = None
-    st.markdown(f"<div style='font-size:32px; font-weight:800; text-align:center;'>{remaining_sidebar}s</div>", unsafe_allow_html=True)
 
     # CSV-Import
     st.markdown("### 📤 CSV importieren")
@@ -313,7 +327,6 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     # Feste Set-Zeilen mit ✅
     for s in range(1, target_sets + 1):
         flag_key = f"{ex_prefix}:{s}"
-        # ist dieser Satz bereits gespeichert?
         stored_already = st.session_state["saved_flags"].get(flag_key, False) or (s <= saved_count)
 
         # Defaults aus vorherigem Satz heute übernehmen
@@ -334,7 +347,6 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
 
         # Wenn Haken gesetzt und noch nicht gespeichert -> sofort persistieren
         if save_now and not stored_already:
-            # Set-Nummer korrekt bestimmen (falls Reihenfolge gesprungen)
             sub_today = df[(df["date"]==today) & (df["tag"]==tag) & (df["exercise"]==name)]
             next_set = 1 if sub_today.empty else int(sub_today["set"].max()) + 1
             set_number = max(next_set, s)
@@ -356,7 +368,6 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             if secs > 0:
                 st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=secs)
 
-            # Refresh
             df = load_log()
             st.rerun()
 
@@ -377,8 +388,8 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         st.info("Heutige Eingaben zurückgesetzt.")
         st.rerun()
 
-# ------------------------- FLOATING TIMER RENDER -------------------------
-render_sticky_timer_and_blink()
+# ------------------------- TIMER RENDER (Floating + Sidebar) -------------------------
+render_timers()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
 st.markdown("---")
