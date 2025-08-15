@@ -35,12 +35,14 @@ SETS_ISO  = 2
 CSV_PATH  = "workout_log.csv"
 
 # ------------------------- SESSION STATE -------------------------
-if "set_buffer" not in st.session_state:
-    st.session_state["set_buffer"] = {}          # key: f"{tag}:{exercise}"
 if "timer_end" not in st.session_state:
     st.session_state["timer_end"] = None
 if "auto_timer_seconds" not in st.session_state:
-    st.session_state["auto_timer_seconds"] = 90   # Auto-Pause nach Speichern
+    st.session_state["auto_timer_seconds"] = 90  # Auto-Pause nach ✅
+if "saved_flags" not in st.session_state:
+    # Merkt pro Übung/Satz, ob heute bereits per ✅ gespeichert wurde
+    # key = f"{tag}:{exercise}:{date}:{setnr}" -> True/False
+    st.session_state["saved_flags"] = {}
 
 # ------------------------- STORAGE HELPERS -------------------------
 def load_log() -> pd.DataFrame:
@@ -119,14 +121,16 @@ def needs_deload(df: pd.DataFrame, block_start: date, every_weeks: int = 8, slip
 def undo_last_set_today(tag: str, name: str):
     dfx = load_log()
     today = date.today().isoformat()
-    sub = dfx[(dfx["tag"]==tag) & (dfx["exercise"]==name) & (dfx["date"]==today)]
+    sub = dfx[(dfx["date"]==today) & (dfx["tag"]==tag) & (dfx["exercise"]==name)]
     if sub.empty:
         st.info("Heute kein gespeicherter Satz für diese Übung.")
         return
     max_set = int(sub["set"].max())
-    dfx = dfx[~((dfx["tag"]==tag) & (dfx["exercise"]==name) & (dfx["date"]==today) & (dfx["set"]==max_set))]
+    dfx = dfx[~((dfx["date"]==today) & (dfx["tag"]==tag) & (dfx["exercise"]==name) & (dfx["set"]==max_set))]
     save_log(dfx)
-    st.success(f"Letzten Satz von heute entfernt (Satz {max_set}).")
+    # Flag zurücksetzen
+    st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
+    st.success(f"Satz {max_set} zurückgenommen.")
 
 # ------------------------- SIDEBAR -------------------------
 with st.sidebar:
@@ -135,7 +139,7 @@ with st.sidebar:
     block_start = st.date_input("Block-Start (für Deload-Timer)", value=date.today())
     deload_every = st.slider("Deload alle X Wochen", 6, 10, 8)
     deload_drop = st.slider("Deload: Gewichtsreduzierung (%)", 20, 45, 35)
-    st.session_state["auto_timer_seconds"] = st.selectbox("Auto-Pause nach Speichern", [0,60,90,120], index=2)
+    st.session_state["auto_timer_seconds"] = st.selectbox("Auto-Pause nach ✅", [0,60,90,120], index=2)
     st.caption("RPE: 8 ≈ 2 Reps Reserve · 9 ≈ 1 RR · 10 = Versagen.")
 
     # CSV-Import
@@ -159,149 +163,153 @@ with st.sidebar:
         confirm = st.checkbox("Ich bestätige, dass ich alle Trainingsdaten löschen möchte.")
         if st.button("🗑️ Alle Daten löschen", disabled=not confirm):
             save_log(pd.DataFrame(columns=["date","tag","exercise","set","weight","reps","rpe","note"]))
+            st.session_state["saved_flags"].clear()
             st.success("Alle Daten wurden gelöscht.")
 
 # ------------------------- HEADER -------------------------
 st.title("🏋️ Progressions-Coach (A/B)")
 st.write(f"**Heute:** {date.today().isoformat()}  ·  **Tag {tag}**")
-st.caption("Regelwerk: Double-Progression (erst Reps hoch, dann Gewicht). Deload bei Woche X oder Leistungseinbruch.")
+st.caption("Double-Progression (erst Reps hoch, dann Gewicht). Deload bei Woche X oder Leistungseinbruch.")
 
 # ------------------------- DELOAD HINWEIS -------------------------
 df = load_log()
 flag, meta = needs_deload(df, block_start, deload_every, slip_tol=2)
 if flag:
     reason = "Kalender" if meta["time"] else ""
-    if meta["fatigue"]:
-        reason += (" & " if reason else "") + f"Leistungsabfall ({meta['slips']})"
+    if meta["fatigue"]: reason += (" & " if reason else "") + f"Leistungsabfall ({meta['slips']})"
     st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50%, 3–4 Wdh. in Reserve.")
 
 # ------------------------- TAGES-FORTSCHRITT -------------------------
-today_plan = PLAN[tag]
-target_today = sum(SETS_MAIN if tp=="main" else SETS_ISO for (_,_,_,_,tp) in today_plan)
-done_today = len(df[(df["date"] == date.today().isoformat()) & (df["tag"] == tag)])
+today_str = date.today().isoformat()
+target_today = sum(SETS_MAIN if tp=="main" else SETS_ISO for (_,_,_,_,tp) in PLAN[tag])
+done_today = len(df[(df["date"]==today_str) & (df["tag"]==tag)])
 st.progress(min(done_today/target_today, 1.0))
 st.caption(f"Heute erledigt: **{done_today}/{target_today} Sätze**")
 
-# ------------------------- ÜBUNGEN / BUFFER / LOG -------------------------
+# ------------------------- PRO ÜBUNG: ALPHA-STYLE SET-ZEILEN -------------------------
 for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     sug = suggest_target(df, tag, name)
-    buffer_key = f"{tag}:{name}"
-    if buffer_key not in st.session_state["set_buffer"]:
-        st.session_state["set_buffer"][buffer_key] = []
+    today = today_str
+    ex_prefix = f"{tag}:{name}:{today}"
+    target_sets = sets_target(tp)
 
-    target_sets = SETS_MAIN if sug.get("tp", tp) == "main" else SETS_ISO
-    current_sets = len(st.session_state["set_buffer"][buffer_key])
+    # Gespeicherte Sätze heute (für Farbe & Defaults)
+    today_sets = df[(df["date"]==today) & (df["tag"]==tag) & (df["exercise"]==name)]
+    saved_count = 0 if today_sets.empty else int(today_sets["set"].max())
 
-    # --------- DARK-MODE-FARBEN + BOX -------------
-    if current_sets == 0:
-        box_bg = "#2b2b2b"    # dunkelgrau
-    elif current_sets < target_sets:
-        box_bg = "#3a3a1d"    # gelblich-dunkel (in Arbeit)
-    elif current_sets == target_sets:
-        box_bg = "#1d3a1d"    # dunkelgrün (fertig)
+    # ---- DARK-MODE-FARBEN nach gespeichertem Fortschritt ----
+    if saved_count == 0:
+        box_bg = "#2b2b2b"
+    elif saved_count < target_sets:
+        box_bg = "#3a3a1d"
+    elif saved_count == target_sets:
+        box_bg = "#1d3a1d"
     else:
-        box_bg = "#144d14"    # kräftigeres Grün (über Soll)
+        box_bg = "#144d14"
 
     st.markdown(
         f"""
         <div style="
             background-color:{box_bg};
             padding:12px; border-radius:10px;
-            color:#ffffff; line-height:1.35;
+            color:#fff; line-height:1.35;
             border:1px solid rgba(255,255,255,0.08);
         ">
           <div style="font-weight:700; font-size:18px;">
             {i}. {name} · Ziel {lr}–{hr} Wdh.
           </div>
-          <div style="opacity:0.95;">
-            <b>Coach:</b> {sug['msg']}
-          </div>
+          <div style="opacity:0.95;"><b>Coach:</b> {sug['msg']}</div>
           <div style="opacity:0.8; font-size:13px; margin-top:4px;">
-            Geplante Sätze im Buffer: {current_sets}/{target_sets}
+            Heute gespeichert: {saved_count}/{target_sets}
           </div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    # Defaults für Inputs
+    # Standardvorschlag aus letzter Einheit
     _, last_u = last_unit(df, tag, name)
-    default_w = float(last_u["weight"].max()) if (last_u is not None and not last_u.empty) else 0.0
-    base_w = float(sug.get("base", default_w))
+    last_weight = float(last_u["weight"].max()) if (last_u is not None and not last_u.empty) else 0.0
+    base_w = float(sug.get("base", last_weight))
+    base_r = lr
 
-    # Inputs + Buffer
-    c1, c2, c3, c4 = st.columns([1.3, 0.9, 0.9, 1.3])
-    w = c1.number_input("Gewicht (kg)", min_value=0.0, step=0.5, value=base_w, key=f"w_{tag}_{i}")
-    r = c2.number_input("Wdh.", min_value=0, step=1, value=lr, key=f"r_{tag}_{i}")
-    rpe = c3.slider("RPE", 5.0, 10.0, 8.0, 0.5, key=f"rpe_{tag}_{i}")
-    add = c4.button("➕ Satz hinzufügen", key=f"add_{tag}_{i}")
+    st.write("")  # etwas Abstand
 
-    if add:
-        st.session_state["set_buffer"][buffer_key].append({"weight": float(w), "reps": int(r), "rpe": float(rpe)})
-        st.success(f"Satz geplant: {w:.1f} kg × {int(r)} (RPE {rpe})")
+    # Feste Set-Zeilen mit ✅
+    for s in range(1, target_sets + 1):
+        flag_key = f"{ex_prefix}:{s}"
+        # ist dieser Satz bereits gespeichert?
+        stored_already = st.session_state["saved_flags"].get(flag_key, False) or (s <= saved_count)
 
-    # Geplante Sätze + Edit/Löschen
-    if current_sets > 0:
-        for idx_buf, row in enumerate(st.session_state["set_buffer"][buffer_key]):
-            cc1, cc2, cc3, cc4, cc5 = st.columns([1.0, 0.9, 0.9, 0.9, 0.8])
-            cc1.markdown(f"**Satz {idx_buf+1}**")
-            row["weight"] = cc2.number_input("kg", min_value=0.0, step=0.5, value=row["weight"], key=f"eb_w_{buffer_key}_{idx_buf}")
-            row["reps"]   = cc3.number_input("Wdh", min_value=0, step=1, value=row["reps"], key=f"eb_r_{buffer_key}_{idx_buf}")
-            row["rpe"]    = cc4.slider("RPE", 5.0, 10.0, float(row["rpe"]), 0.5, key=f"eb_rpe_{buffer_key}_{idx_buf}")
-            if cc5.button("🗑️ Löschen", key=f"del_{buffer_key}_{idx_buf}"):
-                del st.session_state["set_buffer"][buffer_key][idx_buf]
-                st.info("Satz entfernt.")
-                st.rerun()
+        # Defaults aus vorherigem Satz heute übernehmen
+        if s > 1:
+            prev = df[(df["date"]==today) & (df["tag"]==tag) & (df["exercise"]==name) & (df["set"]==s-1)]
+            if not prev.empty:
+                base_w = float(prev["weight"].iloc[0])
+                base_r = int(prev["reps"].iloc[0])
 
-        cbuf1, cbuf2 = st.columns(2)
-        if cbuf1.button("🧹 Alle geplanten Sätze verwerfen", key=f"clear_{buffer_key}"):
-            st.session_state["set_buffer"][buffer_key] = []
-            st.info("Alle geplanten Sätze verworfen.")
-            st.rerun()
+        c1, c2, c3, c4 = st.columns([1.3, 0.8, 0.9, 0.7])
+        w = c1.number_input(f"Satz {s} – Gewicht (kg)", min_value=0.0, step=0.5,
+                            value=base_w, key=f"w_{ex_prefix}_{s}", disabled=stored_already)
+        r = c2.number_input("Wdh.", min_value=0, step=1,
+                            value=base_r, key=f"r_{ex_prefix}_{s}", disabled=stored_already)
+        rpe = c3.slider("RPE", 5.0, 10.0, 8.0, 0.5,
+                        key=f"rpe_{ex_prefix}_{s}", disabled=stored_already)
+        save_now = c4.checkbox("✅", value=stored_already, key=f"chk_{ex_prefix}_{s}")
 
-        if cbuf2.button("💾 Geplante Sätze speichern", key=f"save_{buffer_key}"):
-            today = date.today().isoformat()
-            sub_today = df[(df["tag"] == tag) & (df["exercise"] == name) & (df["date"] == today)]
+        # Wenn Haken gesetzt und noch nicht gespeichert -> sofort persistieren
+        if save_now and not stored_already:
+            # Set-Nummer korrekt bestimmen (falls Reihenfolge gesprungen)
+            sub_today = df[(df["date"]==today) & (df["tag"]==tag) & (df["exercise"]==name)]
             next_set = 1 if sub_today.empty else int(sub_today["set"].max()) + 1
+            set_number = max(next_set, s)
 
-            for k, row in enumerate(st.session_state["set_buffer"][buffer_key]):
-                append_row({
-                    "date": today,
-                    "tag": tag,
-                    "exercise": name,
-                    "set": next_set + k,
-                    "weight": float(row["weight"]),
-                    "reps": int(row["reps"]),
-                    "rpe": float(row["rpe"]),
-                    "note": ""
-                })
+            append_row({
+                "date": today,
+                "tag": tag,
+                "exercise": name,
+                "set": set_number,
+                "weight": float(w),
+                "reps": int(r),
+                "rpe": float(rpe),
+                "note": ""
+            })
+            st.session_state["saved_flags"][flag_key] = True
 
-            st.session_state["set_buffer"][buffer_key] = []
-            df = load_log()
-            st.success("Sätze gespeichert.")
-
-            secs = int(st.session_state["auto_timer_seconds"])
+            # Auto-Pause
+            secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
                 st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=secs)
 
-            st.rerun()
-
-        if st.button("↩️ Letzten gespeicherten Satz von heute zurücknehmen", key=f"undo_{buffer_key}"):
-            undo_last_set_today(tag, name)
+            # Refresh
             df = load_log()
             st.rerun()
+
+    # Undo & Reset (nur diese Übung, heute)
+    cundo1, cundo2 = st.columns(2)
+    if cundo1.button("↩️ Letzten Satz (heute) zurücknehmen", key=f"undo_btn_{ex_prefix}"):
+        undo_last_set_today(tag, name)
+        df = load_log()
+        st.rerun()
+
+    if cundo2.button("🧹 Heutige Eingaben (nur diese Übung) zurücksetzen", key=f"reset_today_{ex_prefix}"):
+        for s in range(1, target_sets + 1):
+            st.session_state["saved_flags"].pop(f"{ex_prefix}:{s}", None)
+            st.session_state.pop(f"w_{ex_prefix}_{s}", None)
+            st.session_state.pop(f"r_{ex_prefix}_{s}", None)
+            st.session_state.pop(f"rpe_{ex_prefix}_{s}", None)
+            st.session_state.pop(f"chk_{ex_prefix}_{s}", None)
+        st.info("Heutige Eingaben zurückgesetzt.")
+        st.rerun()
 
 # ------------------------- PAUSEN-TIMER -------------------------
 st.markdown("---")
 st.subheader("⏱️ Pausen-Timer")
 
 c1, c2, c3, c4, c5 = st.columns(5)
-if c1.button("▶️ 60 s"):
-    st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=60)
-if c2.button("▶️ 90 s"):
-    st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
-if c3.button("▶️ 120 s"):
-    st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
+if c1.button("▶️ 60 s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=60)
+if c2.button("▶️ 90 s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
+if c3.button("▶️ 120 s"): st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
 if c4.button("+30 s") and st.session_state["timer_end"]:
     st.session_state["timer_end"] = st.session_state["timer_end"] + timedelta(seconds=30)
 if c5.button("⏹ Stopp"):
@@ -319,9 +327,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Auto-Refresh mit neuer API; bei Ablauf kurzer Beep + Vibration
+# Auto-Refresh; bei Ablauf kurzer Beep & Vibration
 if st.session_state["timer_end"]:
-    st.query_params["_"] = datetime.utcnow().timestamp()  # kleiner Param-Wechsel -> Re-Render
+    st.query_params["_"] = datetime.utcnow().timestamp()
     st.rerun()
 else:
     st.components.v1.html("""
@@ -342,9 +350,7 @@ with st.expander("📒 Letzte 30 Einträge"):
     else:
         st.dataframe(hist.tail(30), use_container_width=True)
 
-# CSV-Export
-hist = load_log()
-csv_bytes = hist.to_csv(index=False).encode("utf-8")
+csv_bytes = load_log().to_csv(index=False).encode("utf-8")
 st.download_button(
     "📥 CSV exportieren",
     data=csv_bytes,
