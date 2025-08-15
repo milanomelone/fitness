@@ -131,97 +131,72 @@ def undo_last_set_today(tag: str, name: str):
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
 
-# ------------------------- TIMER RENDER (Client-Side, Sidebar + Top-Right Badge) -------------------------
-def render_timers():
+# ------------------------- STICKY TIMER (Floating Panel + Fullscreen Blink) -------------------------
+def render_sticky_timer():
     """
-    Sidebar: große Uhr + Progressbar + +5/-5 Buttons.
-    Badge: kleines Countdown-Badge oben rechts.
-    Beides läuft clientseitig. Ablauf => 3x grünes Blinken + Ton + Vibration.
+    - Schwebendes Panel oben rechts (Start 60/90/120, Stop, −5/+5)
+    - Kleiner Countdown oben rechts
+    - Vollbild-Blinken (GANZE Seite) ca. 5s bei Ablauf + Ton + Vibration
+    - Alles clientseitig via JS (super smooth)
     """
-    start_ms = 0
-    end_ms = 0
-    if st.session_state.get("timer_start"):
-        start_ms = int(st.session_state["timer_start"].timestamp() * 1000)
-    if st.session_state.get("timer_end"):
-        end_ms = int(st.session_state["timer_end"].timestamp() * 1000)
+    start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
+    end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
 
-    # Sidebar – Uhr + Progressbar
-    with st.sidebar:
-        st.components.v1.html(f"""
-        <style>
-          .timer-box {{
-            text-align:center; padding:8px 0 2px;
-          }}
-          .timer-digits {{
-            font-size: 42px; font-weight: 900; line-height: 1; margin-bottom: 8px;
-          }}
-          .timer-bar {{
-            width: 100%; height: 10px; border-radius: 6px; background: #333; overflow: hidden;
-          }}
-          .timer-bar > div {{
-            height: 100%; width: 0%;
-            background: linear-gradient(90deg, #00c853, #ffd54f, #ef5350);
-            transition: width .2s linear;
-          }}
-        </style>
-        <div class="timer-box">
-          <div id="sb-digits" class="timer-digits">0s</div>
-          <div class="timer-bar"><div id="sb-fill"></div></div>
-        </div>
-        <script>
-          var tStart = {start_ms};
-          var tEnd   = {end_ms};
-
-          function fmt(sec) {{
-            if (sec < 60) return sec + 's';
-            var m = Math.floor(sec/60), s = sec % 60;
-            return m + ':' + (s<10?('0'+s):s);
-          }}
-
-          function tickSB(){{
-            if (!tEnd || tEnd <= Date.now()) {{
-              document.getElementById('sb-digits').innerText = '0s';
-              document.getElementById('sb-fill').style.width = '0%';
-              return;
-            }}
-            var total = Math.max(1, Math.floor((tEnd - tStart)/1000));
-            var rem   = Math.max(0, Math.floor((tEnd - Date.now())/1000));
-            var pct   = Math.max(0, Math.min(100, 100 - (rem/total*100)));
-            document.getElementById('sb-digits').innerText = fmt(rem);
-            document.getElementById('sb-fill').style.width = pct + '%';
-          }}
-          tickSB(); setInterval(tickSB, 250);
-        </script>
-        """, height=96)
-
-    # Badge oben rechts + Blink/Beep/Vibrate
     st.components.v1.html(f"""
     <style>
-      @keyframes flashGreen {{
-        0%, 100% {{ opacity: 0; }}
-        50% {{ opacity: .6; }}
-      }}
-      .flash-overlay {{
-        position: fixed; inset: 0; background: #00c853;
-        z-index: 9998; pointer-events: none;
-        animation: flashGreen 0.5s ease-in-out 3;
+      /* Floating control panel (oben rechts) */
+      #timer-panel {{
+        position: fixed; right: 16px; top: 16px;
+        display: flex; align-items: center; gap: 8px;
+        z-index: 9999;
       }}
       #timer-badge {{
-        position: fixed; right: 16px; top: 16px;
         background: rgba(20,20,20,.92); color: #fff;
         padding: 8px 12px; border-radius: 12px;
-        font-size: 18px; font-weight: 800; z-index: 9999;
+        font-size: 18px; font-weight: 800;
         border: 1px solid rgba(255,255,255,.08);
         box-shadow: 0 8px 24px rgba(0,0,0,.35);
         -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
       }}
+      .tp-btn {{
+        font-size: 12px; font-weight: 800; line-height: 1;
+        padding: 8px 10px; border-radius: 10px;
+        border: 1px solid rgba(255,255,255,.15);
+        background: rgba(32,32,32,.95); color: #fff; cursor: pointer;
+        user-select: none;
+      }}
+      .tp-btn:active {{ transform: translateY(1px); }}
+      @keyframes flashGreen {{
+        0% {{ opacity: 0; }} 25% {{ opacity: .6; }} 50% {{ opacity: 0; }} 75% {{ opacity: .6; }} 100% {{ opacity: 0; }}
+      }}
+      .flash-overlay {{
+        position: fixed; inset: 0; background: #00c853;
+        z-index: 9998; pointer-events: none;
+        animation: flashGreen 1s ease-in-out 5; /* ~5 Sekunden, 5 Zyklen */
+      }}
     </style>
-    <div id="timer-badge">⏱ 0s</div>
+
+    <div id="timer-panel">
+      <div id="timer-badge">⏱ 0s</div>
+      <button class="tp-btn" id="t60">60s</button>
+      <button class="tp-btn" id="t90">90s</button>
+      <button class="tp-btn" id="t120">120s</button>
+      <button class="tp-btn" id="tminus">−5s</button>
+      <button class="tp-btn" id="tplus">+5s</button>
+      <button class="tp-btn" id="tstop">Stop</button>
+    </div>
+
     <script>
       var tStart = {start_ms};
       var tEnd   = {end_ms};
       var badge  = document.getElementById('timer-badge');
       var done   = false;
+
+      function fmt(sec){{
+        if (sec < 60) return sec + 's';
+        var m = Math.floor(sec/60), s = sec % 60;
+        return m + ':' + (s<10?('0'+s):s);
+      }}
 
       function beep(){{
         try {{
@@ -230,35 +205,62 @@ def render_timers():
           o.type = 'sine'; o.frequency.value = 880;
           o.connect(g); g.connect(ctx.destination);
           g.gain.setValueAtTime(0.0001, ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 0.02);
-          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
-          o.start(); o.stop(ctx.currentTime + 0.27);
+          g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+          o.start(); o.stop(ctx.currentTime + 0.37);
         }} catch(e) {{}}
       }}
-      function blink(){{
+
+      function fullBlink(){{
         var ov = document.createElement('div');
         ov.className = 'flash-overlay';
         document.body.appendChild(ov);
-        setTimeout(()=>{{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }}, 1600);
+        setTimeout(()=>{{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }}, 5200);
       }}
-      function fmt(sec) {{
-        if (sec < 60) return sec + 's';
-        var m = Math.floor(sec/60), s = sec % 60;
-        return m + ':' + (s<10?('0'+s):s);
+
+      function startTimer(seconds){{
+        var now = Date.now();
+        tStart = now;
+        tEnd   = now + seconds*1000;
+        done   = false;
       }}
-      function upd(){{
-        if (!tEnd || tEnd <= Date.now()) {{ badge.textContent = '⏱ 0s'; return; }}
+
+      function stopTimer(){{
+        tStart = 0; tEnd = 0; done = true;
+        badge.textContent = '⏱ 0s';
+      }}
+
+      function shiftTimer(ms){{
+        if (!tEnd) return;
+        // Mindestens jetzt, damit wir nicht „ins Negative“ springen
+        tEnd = Math.max(Date.now(), tEnd + ms);
+      }}
+
+      // UI Buttons (clientseitig)
+      document.getElementById('t60').addEventListener('click', ()=>startTimer(60));
+      document.getElementById('t90').addEventListener('click', ()=>startTimer(90));
+      document.getElementById('t120').addEventListener('click',()=>startTimer(120));
+      document.getElementById('tminus').addEventListener('click',()=>shiftTimer(-5000));
+      document.getElementById('tplus').addEventListener('click', ()=>shiftTimer(+5000));
+      document.getElementById('tstop').addEventListener('click', stopTimer);
+
+      function tick(){
+        if (!tEnd || tEnd <= Date.now()){
+          badge.textContent = '⏱ 0s';
+          return;
+        }
         var rem = Math.max(0, Math.floor((tEnd - Date.now())/1000));
         badge.textContent = '⏱ ' + fmt(rem);
-        if (rem === 0 && !done) {{
-          done = true; blink(); beep(); if (navigator.vibrate) navigator.vibrate([160,80,160]);
-        }}
-      }}
-      upd(); setInterval(upd, 250);
+        if (rem === 0 && !done){
+          done = true;
+          fullBlink(); beep(); if (navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
+        }
+      }
+      tick(); setInterval(tick, 250);
     </script>
     """, height=0)
 
-# ------------------------- SIDEBAR (Settings + Timer-Buttons inkl. +/- 5s) -------------------------
+# ------------------------- SIDEBAR (nur Settings – KEIN Timer mehr) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
     tag = st.selectbox("Trainingstag", ["A","B"])
@@ -269,30 +271,7 @@ with st.sidebar:
     st.caption("RPE: 8 ≈ 2 RR · 9 ≈ 1 RR · 10 = Versagen.")
 
     st.markdown("---")
-    st.subheader("⏱️ Pausen-Timer")
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-
-    def start_timer(seconds: int):
-        st.session_state["timer_start"] = datetime.utcnow()
-        st.session_state["timer_end"]   = st.session_state["timer_start"] + timedelta(seconds=seconds)
-
-    if col1.button("▶️60"):  start_timer(60)
-    if col2.button("▶️90"):  start_timer(90)
-    if col3.button("▶️120"): start_timer(120)
-    if col4.button("−5"):
-        if st.session_state.get("timer_end"):
-            st.session_state["timer_end"] -= timedelta(seconds=5)
-            if st.session_state["timer_end"] < datetime.utcnow():
-                st.session_state["timer_end"] = datetime.utcnow()
-    if col5.button("+5"):
-        if st.session_state.get("timer_end"):
-            st.session_state["timer_end"] += timedelta(seconds=5)
-    if col6.button("⏹"):
-        st.session_state["timer_start"] = None
-        st.session_state["timer_end"]   = None
-
-    # CSV-Import
-    st.markdown("### 📤 CSV importieren")
+    st.subheader("📤 CSV importieren")
     uploaded = st.file_uploader("Vorherige workout_log.csv auswählen", type=["csv"])
     if uploaded is not None:
         try:
@@ -424,7 +403,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             })
             st.session_state["saved_flags"][flag_key] = True
 
-            # Auto-Pause nach ✅
+            # Auto-Pause nach ✅ (Backend setzt Start/Ende; JS liest sie beim nächsten Render)
             secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
                 st.session_state["timer_start"] = datetime.utcnow()
@@ -450,8 +429,8 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         st.info("Heutige Eingaben zurückgesetzt.")
         st.rerun()
 
-# ------------------------- TIMER RENDER -------------------------
-render_timers()
+# ------------------------- STICKY TIMER RENDER -------------------------
+render_sticky_timer()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
 st.markdown("---")
