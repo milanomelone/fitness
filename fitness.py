@@ -77,25 +77,66 @@ def last_unit(df: pd.DataFrame, tag: str, ex_name: str):
     return d, sub[sub["date"] == d]
 
 def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
+    """
+    Coach-Logik (dynamisch):
+    - Nutzt letzte Einheit (Gewicht, Reps, RPE) für die Empfehlung.
+    - Regeln:
+        1) Wenn ALLE Sätze >= oberes Ziel (hr) UND max RPE <= 9.0  -> Gewicht + Inkrement
+        2) Wenn max RPE >= 9.5 und nicht am oberen Limit            -> Gewicht HALTEN (erst Reps nachziehen)
+        3) Wenn viele Sätze < unterem Ziel (lr) ODER max RPE sehr hoch -> Gewicht HALTEN, ggf. kleines Minus erwägen
+        4) Sonst: Reps steigern (+1/Satz) bis hr erreicht ist
+    """
+    # Ziel-Ranges & Inkrement + Typ holen
     lr = hr = inc = None
     tp = "main"
     for n, a, b, c, t in PLAN[tag]:
         if n == ex_name:
             lr, hr, inc, tp = a, b, c, t
             break
+
     hist_date, unit = last_unit(df, tag, ex_name)
+    # Keine Historie -> Start
     if unit is None or unit.empty:
         return {"msg": f"Erste Einheit: Startgewicht wählen. Ziel: {sets_target(tp)} Sätze {lr}–{hr}.",
                 "mode": "start", "lr": lr, "hr": hr, "tp": tp}
+
     last_w = float(unit["weight"].max())
     reps_list = [int(x) for x in unit["reps"].tolist() if pd.notnull(x)]
-    all_top = (len(reps_list) >= 1) and all(r >= hr for r in reps_list)
-    if all_top:
-        return {"msg": f"Heute **+{inc} kg** → Range reset ({lr}–{lr+1}). Letztes Mal ~{last_w:.1f} kg.",
+    rpe_list  = [float(x) for x in unit["rpe"].tolist()  if pd.notnull(x)]
+    max_rpe   = max(rpe_list) if rpe_list else 8.0
+    avg_reps  = sum(reps_list)/len(reps_list) if reps_list else 0
+    sets_cnt  = len(reps_list) if reps_list else 0
+
+    all_top       = (sets_cnt >= 1) and all(r >= hr for r in reps_list)
+    many_below_lr = (sets_cnt >= 1) and (sum(r < lr for r in reps_list) >= max(1, sets_cnt // 2))
+    near_top      = (sets_cnt >= 1) and all(r >= lr for r in reps_list) and (avg_reps >= (hr - 1))
+
+    # 1) Klarer Fall: Gewicht rauf
+    if all_top and max_rpe <= 9.0:
+        return {"msg": f"Heute **+{inc} kg** → Range reset ({lr}–{lr+1}). Letztes Mal ~{last_w:.1f} kg (RPE max {max_rpe:.1f}).",
                 "mode":"add_weight","inc":inc,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
-    else:
-        return {"msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg, bis {hr} erreicht.",
+
+    # 2) Sehr hoch belastet -> erst Reps festigen
+    if max_rpe >= 9.5 and not all_top:
+        hint = "Gewicht halten, Reps Richtung oberes Ziel bringen."
+        if many_below_lr:
+            hint = "Gewicht halten (optional −1–2 kg), erst solide in den Zielbereich kommen."
+        return {"msg": f"{hint} Letztes Mal: ~{last_w:.1f} kg, Ø{avg_reps:.1f} Wdh., RPE max {max_rpe:.1f}.",
                 "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
+
+    # 3) Viele Sätze unter unterem Ziel -> halten (optional leicht reduzieren)
+    if many_below_lr:
+        return {"msg": f"Gewicht halten (optional −1–2 kg). Ziel: erst {lr}–{hr} stabil erreichen. Letztes Mal ~{last_w:.1f} kg.",
+                "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
+
+    # 4) In Range, aber nicht top -> Reps steigern
+    if near_top and max_rpe <= 9.0:
+        return {"msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg, bis {hr} erreicht. RPE gut ({max_rpe:.1f}).",
+                "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
+
+    # Default: konservativ Reps steigern
+    return {"msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg. Wenn RPE ≤ 9 bleibt, bald +{inc} kg.",
+            "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
 
 def weeks_since(d: date) -> int:
     return max(1, (date.today() - d).days // 7 + 1)
@@ -291,7 +332,6 @@ def render_sticky_timer():
         if (panelNow){
           panelNow.setAttribute('data-gx-start', '""" + str(start_ms) + """');
           panelNow.setAttribute('data-gx-end',   '""" + str(end_ms) + """');
-          // OPTION: Wenn du willst, könntest du hier aus data-Attr lesen und den laufenden Timer syncen
         }
       })();
     </script>
