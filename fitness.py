@@ -195,4 +195,4 @@ with st.expander("📒 Letzte 30 Einträge"):
     else:
         st.dataframe(hist.tail(30), use_container_width=True)
 
-st.caption("Regelwerk: Double-Progression (erst Reps hoch, dann Gewicht). Deload bei Woche X oder Leistungseinbruch.")p
+st.caption("Regelwerk: Double-Progression (erst Reps hoch, dann Gewicht). Deload bei Woche X oder Leistungseinbruch.")
