@@ -35,6 +35,8 @@ SETS_ISO  = 2
 CSV_PATH  = "workout_log.csv"
 
 # ------------------------- SESSION STATE -------------------------
+if "timer_start" not in st.session_state:
+    st.session_state["timer_start"] = None
 if "timer_end" not in st.session_state:
     st.session_state["timer_end"] = None
 if "auto_timer_seconds" not in st.session_state:
@@ -129,32 +131,70 @@ def undo_last_set_today(tag: str, name: str):
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
 
-# ------------------------- CLIENT TIMER (JS-basiert) -------------------------
+# ------------------------- TIMER RENDER (Client-Side, Sidebar + Top-Right Badge) -------------------------
 def render_timers():
     """
-    Floating Timer + Sidebar-Anzeige – komplett clientseitig (kein st.rerun nötig).
-    Bei Ablauf: 3x grünes Blinken, Ton, Vibration.
+    Sidebar: große Uhr + Progressbar + +5/-5 Buttons.
+    Badge: kleines Countdown-Badge oben rechts.
+    Beides läuft clientseitig. Ablauf => 3x grünes Blinken + Ton + Vibration.
     """
-    end_ts_ms = 0
+    start_ms = 0
+    end_ms = 0
+    if st.session_state.get("timer_start"):
+        start_ms = int(st.session_state["timer_start"].timestamp() * 1000)
     if st.session_state.get("timer_end"):
-        end_ts_ms = int(st.session_state["timer_end"].timestamp() * 1000)
+        end_ms = int(st.session_state["timer_end"].timestamp() * 1000)
 
-    # Sidebar-Anzeige (dynamisch)
+    # Sidebar – Uhr + Progressbar
     with st.sidebar:
         st.components.v1.html(f"""
-        <div id="sb-timer" style="text-align:center; font-size:32px; font-weight:800;">0s</div>
-        <script>
-          var endTs = {end_ts_ms};
-          function updSB(){{
-            if (!endTs) {{ document.getElementById('sb-timer').innerText = '0s'; return; }}
-            var rem = Math.max(0, Math.floor((endTs - Date.now())/1000));
-            document.getElementById('sb-timer').innerText = rem + 's';
+        <style>
+          .timer-box {{
+            text-align:center; padding:8px 0 2px;
           }}
-          updSB(); setInterval(updSB, 1000);
-        </script>
-        """, height=40)
+          .timer-digits {{
+            font-size: 42px; font-weight: 900; line-height: 1; margin-bottom: 8px;
+          }}
+          .timer-bar {{
+            width: 100%; height: 10px; border-radius: 6px; background: #333; overflow: hidden;
+          }}
+          .timer-bar > div {{
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, #00c853, #ffd54f, #ef5350);
+            transition: width .2s linear;
+          }}
+        </style>
+        <div class="timer-box">
+          <div id="sb-digits" class="timer-digits">0s</div>
+          <div class="timer-bar"><div id="sb-fill"></div></div>
+        </div>
+        <script>
+          var tStart = {start_ms};
+          var tEnd   = {end_ms};
 
-    # Floating Timer + Blink/Beep/Vibrate
+          function fmt(sec) {{
+            if (sec < 60) return sec + 's';
+            var m = Math.floor(sec/60), s = sec % 60;
+            return m + ':' + (s<10?('0'+s):s);
+          }}
+
+          function tickSB(){{
+            if (!tEnd || tEnd <= Date.now()) {{
+              document.getElementById('sb-digits').innerText = '0s';
+              document.getElementById('sb-fill').style.width = '0%';
+              return;
+            }}
+            var total = Math.max(1, Math.floor((tEnd - tStart)/1000));
+            var rem   = Math.max(0, Math.floor((tEnd - Date.now())/1000));
+            var pct   = Math.max(0, Math.min(100, 100 - (rem/total*100)));
+            document.getElementById('sb-digits').innerText = fmt(rem);
+            document.getElementById('sb-fill').style.width = pct + '%';
+          }}
+          tickSB(); setInterval(tickSB, 250);
+        </script>
+        """, height=96)
+
+    # Badge oben rechts + Blink/Beep/Vibrate
     st.components.v1.html(f"""
     <style>
       @keyframes flashGreen {{
@@ -167,10 +207,10 @@ def render_timers():
         animation: flashGreen 0.5s ease-in-out 3;
       }}
       #timer-badge {{
-        position: fixed; right: 16px; bottom: 16px;
+        position: fixed; right: 16px; top: 16px;
         background: rgba(20,20,20,.92); color: #fff;
-        padding: 10px 14px; border-radius: 12px;
-        font-size: 24px; font-weight: 800; z-index: 9999;
+        padding: 8px 12px; border-radius: 12px;
+        font-size: 18px; font-weight: 800; z-index: 9999;
         border: 1px solid rgba(255,255,255,.08);
         box-shadow: 0 8px 24px rgba(0,0,0,.35);
         -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
@@ -178,9 +218,11 @@ def render_timers():
     </style>
     <div id="timer-badge">⏱ 0s</div>
     <script>
-      var endTs = {end_ts_ms};
-      var badge = document.getElementById('timer-badge');
-      var done = false;
+      var tStart = {start_ms};
+      var tEnd   = {end_ms};
+      var badge  = document.getElementById('timer-badge');
+      var done   = false;
+
       function beep(){{
         try {{
           var ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -199,20 +241,24 @@ def render_timers():
         document.body.appendChild(ov);
         setTimeout(()=>{{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }}, 1600);
       }}
+      function fmt(sec) {{
+        if (sec < 60) return sec + 's';
+        var m = Math.floor(sec/60), s = sec % 60;
+        return m + ':' + (s<10?('0'+s):s);
+      }}
       function upd(){{
-        if (!endTs) {{ badge.innerText = '⏱ 0s'; return; }}
-        var rem = Math.max(0, Math.floor((endTs - Date.now())/1000));
-        badge.textContent = '⏱ ' + rem + 's';
+        if (!tEnd || tEnd <= Date.now()) {{ badge.textContent = '⏱ 0s'; return; }}
+        var rem = Math.max(0, Math.floor((tEnd - Date.now())/1000));
+        badge.textContent = '⏱ ' + fmt(rem);
         if (rem === 0 && !done) {{
-          done = true;
-          blink(); beep(); if (navigator.vibrate) navigator.vibrate([160,80,160]);
+          done = true; blink(); beep(); if (navigator.vibrate) navigator.vibrate([160,80,160]);
         }}
       }}
-      upd(); setInterval(upd, 1000);
+      upd(); setInterval(upd, 250);
     </script>
     """, height=0)
 
-# ------------------------- SIDEBAR (Settings + Timer-Buttons) -------------------------
+# ------------------------- SIDEBAR (Settings + Timer-Buttons inkl. +/- 5s) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
     tag = st.selectbox("Trainingstag", ["A","B"])
@@ -224,11 +270,26 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("⏱️ Pausen-Timer")
-    col = st.columns(4)
-    if col[0].button("▶️ 60s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=60)
-    if col[1].button("▶️ 90s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
-    if col[2].button("▶️ 120s"): st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
-    if col[3].button("⏹"):       st.session_state["timer_end"] = None
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+    def start_timer(seconds: int):
+        st.session_state["timer_start"] = datetime.utcnow()
+        st.session_state["timer_end"]   = st.session_state["timer_start"] + timedelta(seconds=seconds)
+
+    if col1.button("▶️60"):  start_timer(60)
+    if col2.button("▶️90"):  start_timer(90)
+    if col3.button("▶️120"): start_timer(120)
+    if col4.button("−5"):
+        if st.session_state.get("timer_end"):
+            st.session_state["timer_end"] -= timedelta(seconds=5)
+            if st.session_state["timer_end"] < datetime.utcnow():
+                st.session_state["timer_end"] = datetime.utcnow()
+    if col5.button("+5"):
+        if st.session_state.get("timer_end"):
+            st.session_state["timer_end"] += timedelta(seconds=5)
+    if col6.button("⏹"):
+        st.session_state["timer_start"] = None
+        st.session_state["timer_end"]   = None
 
     # CSV-Import
     st.markdown("### 📤 CSV importieren")
@@ -366,7 +427,8 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             # Auto-Pause nach ✅
             secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
-                st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=secs)
+                st.session_state["timer_start"] = datetime.utcnow()
+                st.session_state["timer_end"]   = st.session_state["timer_start"] + timedelta(seconds=secs)
 
             df = load_log()
             st.rerun()
@@ -388,7 +450,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         st.info("Heutige Eingaben zurückgesetzt.")
         st.rerun()
 
-# ------------------------- TIMER RENDER (Floating + Sidebar) -------------------------
+# ------------------------- TIMER RENDER -------------------------
 render_timers()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
