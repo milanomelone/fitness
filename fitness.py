@@ -103,9 +103,9 @@ def weeks_since(d: date) -> int:
 def needs_deload(df: pd.DataFrame, block_start: date, every_weeks: int = 8, slip_tol: int = 2):
     time_flag = (weeks_since(block_start) % every_weeks == 0)
     slips = 0
-    for tag in ["A","B"]:
-        for (name, *_ ) in PLAN[tag]:
-            sub = df[(df["tag"]==tag) & (df["exercise"]==name)]
+    for t in ["A","B"]:
+        for (name, *_ ) in PLAN[t]:
+            sub = df[(df["tag"]==t) & (df["exercise"]==name)]
             if sub.empty: continue
             days = sorted(sub["date"].unique())
             if len(days) < 2: continue
@@ -135,45 +135,46 @@ def undo_last_set_today(tag: str, name: str):
 def render_sticky_timer():
     """
     - Schwebendes Panel oben rechts (Start 60/90/120, Stop, −5/+5)
-    - Kleiner Countdown oben rechts
-    - Vollbild-Blinken (GANZE Seite) ca. 5s bei Ablauf + Ton + Vibration
-    - Alles clientseitig via JS (super smooth)
+    - Countdown oben rechts (sticky)
+    - Vollbild-Blinken ~5s bei Ablauf + Ton + Vibration
+    - Clientseitiges JS; Variablen werden ohne f-String-Platzhalter injiziert (kein {}-Problem)
     """
     start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
     end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
 
-    st.components.v1.html(f"""
+    html = """
     <style>
-      /* Floating control panel (oben rechts) */
-      #timer-panel {{
+      #timer-panel {
         position: fixed; right: 16px; top: 16px;
         display: flex; align-items: center; gap: 8px;
         z-index: 9999;
-      }}
-      #timer-badge {{
+      }
+      #timer-badge {
         background: rgba(20,20,20,.92); color: #fff;
         padding: 8px 12px; border-radius: 12px;
         font-size: 18px; font-weight: 800;
         border: 1px solid rgba(255,255,255,.08);
         box-shadow: 0 8px 24px rgba(0,0,0,.35);
         -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
-      }}
-      .tp-btn {{
+      }
+      .tp-btn {
         font-size: 12px; font-weight: 800; line-height: 1;
         padding: 8px 10px; border-radius: 10px;
         border: 1px solid rgba(255,255,255,.15);
         background: rgba(32,32,32,.95); color: #fff; cursor: pointer;
         user-select: none;
-      }}
-      .tp-btn:active {{ transform: translateY(1px); }}
-      @keyframes flashGreen {{
-        0% {{ opacity: 0; }} 25% {{ opacity: .6; }} 50% {{ opacity: 0; }} 75% {{ opacity: .6; }} 100% {{ opacity: 0; }}
-      }}
-      .flash-overlay {{
+      }
+      .tp-btn:active { transform: translateY(1px); }
+
+      @keyframes flashGreen {
+        0% { opacity: 0; } 25% { opacity: .6; } 50% { opacity: 0; }
+        75% { opacity: .6; } 100% { opacity: 0; }
+      }
+      .flash-overlay {
         position: fixed; inset: 0; background: #00c853;
         z-index: 9998; pointer-events: none;
-        animation: flashGreen 1s ease-in-out 5; /* ~5 Sekunden, 5 Zyklen */
-      }}
+        animation: flashGreen 1s ease-in-out 5; /* ~5 Sekunden */
+      }
     </style>
 
     <div id="timer-panel">
@@ -187,19 +188,18 @@ def render_sticky_timer():
     </div>
 
     <script>
-      var tStart = {start_ms};
-      var tEnd   = {end_ms};
+      var tStart = """ + str(start_ms) + """;
+      var tEnd   = """ + str(end_ms) + """;
       var badge  = document.getElementById('timer-badge');
       var done   = false;
 
-      function fmt(sec){{
+      function fmt(sec){
         if (sec < 60) return sec + 's';
         var m = Math.floor(sec/60), s = sec % 60;
         return m + ':' + (s<10?('0'+s):s);
-      }}
-
-      function beep(){{
-        try {{
+      }
+      function beep(){
+        try {
           var ctx = new (window.AudioContext || window.webkitAudioContext)();
           var o = ctx.createOscillator(); var g = ctx.createGain();
           o.type = 'sine'; o.frequency.value = 880;
@@ -208,35 +208,29 @@ def render_sticky_timer():
           g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
           g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
           o.start(); o.stop(ctx.currentTime + 0.37);
-        }} catch(e) {{}}
-      }}
-
-      function fullBlink(){{
+        } catch(e) {}
+      }
+      function fullBlink(){
         var ov = document.createElement('div');
         ov.className = 'flash-overlay';
         document.body.appendChild(ov);
-        setTimeout(()=>{{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }}, 5200);
-      }}
-
-      function startTimer(seconds){{
+        setTimeout(()=>{ if(ov && ov.parentNode) ov.parentNode.removeChild(ov); }, 5200);
+      }
+      function startTimer(seconds){
         var now = Date.now();
         tStart = now;
         tEnd   = now + seconds*1000;
         done   = false;
-      }}
-
-      function stopTimer(){{
+      }
+      function stopTimer(){
         tStart = 0; tEnd = 0; done = true;
         badge.textContent = '⏱ 0s';
-      }}
-
-      function shiftTimer(ms){{
+      }
+      function shiftTimer(ms){
         if (!tEnd) return;
-        // Mindestens jetzt, damit wir nicht „ins Negative“ springen
         tEnd = Math.max(Date.now(), tEnd + ms);
-      }}
-
-      // UI Buttons (clientseitig)
+      }
+      // Buttons (clientseitig)
       document.getElementById('t60').addEventListener('click', ()=>startTimer(60));
       document.getElementById('t90').addEventListener('click', ()=>startTimer(90));
       document.getElementById('t120').addEventListener('click',()=>startTimer(120));
@@ -258,9 +252,10 @@ def render_sticky_timer():
       }
       tick(); setInterval(tick, 250);
     </script>
-    """, height=0)
+    """
+    st.components.v1.html(html, height=0)
 
-# ------------------------- SIDEBAR (nur Settings – KEIN Timer mehr) -------------------------
+# ------------------------- SIDEBAR (nur Settings – KEIN Timer) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
     tag = st.selectbox("Trainingstag", ["A","B"])
@@ -403,7 +398,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             })
             st.session_state["saved_flags"][flag_key] = True
 
-            # Auto-Pause nach ✅ (Backend setzt Start/Ende; JS liest sie beim nächsten Render)
+            # Auto-Pause nach ✅ (Backend setzt Start/Ende; JS liest beim nächsten Render)
             secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
                 st.session_state["timer_start"] = datetime.utcnow()
