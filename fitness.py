@@ -43,6 +43,8 @@ if "saved_flags" not in st.session_state:
     # Merkt pro Übung/Satz, ob heute bereits per ✅ gespeichert wurde
     # key = f"{tag}:{exercise}:{date}:{setnr}" -> True/False
     st.session_state["saved_flags"] = {}
+if "last_blink_ts" not in st.session_state:
+    st.session_state["last_blink_ts"] = 0.0  # verhindert mehrfaches Blinken
 
 # ------------------------- STORAGE HELPERS -------------------------
 def load_log() -> pd.DataFrame:
@@ -128,9 +130,65 @@ def undo_last_set_today(tag: str, name: str):
     max_set = int(sub["set"].max())
     dfx = dfx[~((dfx["date"]==today) & (dfx["tag"]==tag) & (dfx["exercise"]==name) & (dfx["set"]==max_set))]
     save_log(dfx)
-    # Flag zurücksetzen
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
+
+# ------------------------- TIMER RENDERING -------------------------
+def render_sticky_timer_and_blink():
+    """Floating Timer + 3x grün blinken + Beep + Vibration am Ende."""
+    remaining = 0
+    if st.session_state.get("timer_end"):
+        remaining = max(0, int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds()))
+        if remaining == 0:
+            st.session_state["timer_end"] = None
+            # Blink + Beep + Vibration (einmal pro Ablauf)
+            now_ts = datetime.utcnow().timestamp()
+            if now_ts - st.session_state.get("last_blink_ts", 0) > 0.8:
+                st.session_state["last_blink_ts"] = now_ts
+                st.components.v1.html("""
+                <style>
+                  @keyframes flashGreen {
+                    0%, 100% { opacity: 0; }
+                    50% { opacity: .6; }
+                  }
+                  .flash-overlay {
+                    position: fixed; inset: 0; background: #00c853; 
+                    z-index: 9998; pointer-events: none;
+                    animation: flashGreen 0.5s ease-in-out 3;
+                  }
+                </style>
+                <div class="flash-overlay"></div>
+                <audio autoplay>
+                  <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
+                </audio>
+                <script>
+                  if (navigator.vibrate) navigator.vibrate([160,80,160]);
+                  setTimeout(() => {
+                    const el = document.querySelector('.flash-overlay');
+                    if (el) el.remove();
+                  }, 1600);
+                </script>
+                """, height=0)
+
+    # Floating Timer (immer sichtbar)
+    st.markdown(f"""
+    <div style="
+        position: fixed; right: 16px; bottom: 16px;
+        background: rgba(20,20,20,.92); color: #fff;
+        padding: 10px 14px; border-radius: 12px;
+        font-size: 24px; font-weight: 800; z-index: 9999;
+        box-shadow: 0 8px 24px rgba(0,0,0,.35);
+        border: 1px solid rgba(255,255,255,.08);
+        -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+    ">
+      ⏱ {remaining}s
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Auto-Refresh jede Sekunde solange Timer läuft
+    if st.session_state.get("timer_end"):
+        st.query_params["_"] = datetime.utcnow().timestamp()
+        st.rerun()
 
 # ------------------------- SIDEBAR -------------------------
 with st.sidebar:
@@ -141,6 +199,22 @@ with st.sidebar:
     deload_drop = st.slider("Deload: Gewichtsreduzierung (%)", 20, 45, 35)
     st.session_state["auto_timer_seconds"] = st.selectbox("Auto-Pause nach ✅", [0,60,90,120], index=2)
     st.caption("RPE: 8 ≈ 2 Reps Reserve · 9 ≈ 1 RR · 10 = Versagen.")
+
+    st.markdown("---")
+    st.subheader("⏱️ Pausen-Timer")
+    col = st.columns(4)
+    if col[0].button("▶️ 60s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=60)
+    if col[1].button("▶️ 90s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
+    if col[2].button("▶️ 120s"): st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
+    if col[3].button("⏹"):       st.session_state["timer_end"] = None
+
+    # Anzeige in der Sidebar
+    remaining_sidebar = 0
+    if st.session_state.get("timer_end"):
+        remaining_sidebar = max(0, int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds()))
+        if remaining_sidebar == 0:
+            st.session_state["timer_end"] = None
+    st.markdown(f"<div style='font-size:32px; font-weight:800; text-align:center;'>{remaining_sidebar}s</div>", unsafe_allow_html=True)
 
     # CSV-Import
     st.markdown("### 📤 CSV importieren")
@@ -176,7 +250,8 @@ df = load_log()
 flag, meta = needs_deload(df, block_start, deload_every, slip_tol=2)
 if flag:
     reason = "Kalender" if meta["time"] else ""
-    if meta["fatigue"]: reason += (" & " if reason else "") + f"Leistungsabfall ({meta['slips']})"
+    if meta["fatigue"]:
+        reason += (" & " if reason else "") + f"Leistungsabfall ({meta['slips']})"
     st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50%, 3–4 Wdh. in Reserve.")
 
 # ------------------------- TAGES-FORTSCHRITT -------------------------
@@ -233,7 +308,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     base_w = float(sug.get("base", last_weight))
     base_r = lr
 
-    st.write("")  # etwas Abstand
+    st.write("")  # Abstand
 
     # Feste Set-Zeilen mit ✅
     for s in range(1, target_sets + 1):
@@ -276,7 +351,7 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             })
             st.session_state["saved_flags"][flag_key] = True
 
-            # Auto-Pause
+            # Auto-Pause nach ✅
             secs = int(st.session_state.get("auto_timer_seconds", 0))
             if secs > 0:
                 st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=secs)
@@ -302,44 +377,8 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
         st.info("Heutige Eingaben zurückgesetzt.")
         st.rerun()
 
-# ------------------------- PAUSEN-TIMER -------------------------
-st.markdown("---")
-st.subheader("⏱️ Pausen-Timer")
-
-c1, c2, c3, c4, c5 = st.columns(5)
-if c1.button("▶️ 60 s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=60)
-if c2.button("▶️ 90 s"):  st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
-if c3.button("▶️ 120 s"): st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
-if c4.button("+30 s") and st.session_state["timer_end"]:
-    st.session_state["timer_end"] = st.session_state["timer_end"] + timedelta(seconds=30)
-if c5.button("⏹ Stopp"):
-    st.session_state["timer_end"] = None
-
-remaining = 0
-if st.session_state["timer_end"]:
-    remaining = int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds())
-    if remaining <= 0:
-        st.session_state["timer_end"] = None
-        remaining = 0
-
-st.markdown(
-    f"<div style='font-size:48px; font-weight:700; text-align:center;'>{remaining}s</div>",
-    unsafe_allow_html=True
-)
-
-# Auto-Refresh; bei Ablauf kurzer Beep & Vibration
-if st.session_state["timer_end"]:
-    st.query_params["_"] = datetime.utcnow().timestamp()
-    st.rerun()
-else:
-    st.components.v1.html("""
-    <audio id="beep" autoplay>
-      <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
-    </audio>
-    <script>
-      if (navigator.vibrate) navigator.vibrate([150,80,150]);
-    </script>
-    """, height=0)
+# ------------------------- FLOATING TIMER RENDER -------------------------
+render_sticky_timer_and_blink()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
 st.markdown("---")
