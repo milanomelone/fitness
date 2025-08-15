@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
-import time
 import os
 
 st.set_page_config(page_title="Progressions-Coach A/B", layout="centered")
 
-# ------------------------- DEIN PLAN -------------------------
+# ------------------------- PLAN -------------------------
 PLAN = {
     "A": [
         ("Schrägbankdrücken KH/LH", 6, 10, 2.5, "main"),
@@ -31,10 +30,17 @@ PLAN = {
     ]
 }
 
-SETS_MAIN = 3   # Ziel-Sätze pro "main"-Übung (kannst du anpassen)
-SETS_ISO  = 2   # Ziel-Sätze pro Isolationsübung
+SETS_MAIN = 3
+SETS_ISO  = 2
+CSV_PATH  = "workout_log.csv"
 
-CSV_PATH = "workout_log.csv"   # Persistenz ohne Tokens (Export/Import unten)
+# ------------------------- INIT SESSION STATE -------------------------
+if "set_buffer" not in st.session_state:
+    # key: f"{tag}:{exercise_name}" -> list of dicts [{"weight":..,"reps":..,"rpe":..}]
+    st.session_state["set_buffer"] = {}
+
+if "timer_end" not in st.session_state:
+    st.session_state["timer_end"] = None
 
 # ------------------------- HELPERS -------------------------
 def sets_target(tp: str) -> int:
@@ -45,7 +51,6 @@ def load_log() -> pd.DataFrame:
     if os.path.exists(CSV_PATH):
         try:
             df = pd.read_csv(CSV_PATH)
-            # Sicherstellen, dass alle Spalten existieren:
             for c in cols:
                 if c not in df.columns:
                     df[c] = None
@@ -71,10 +76,6 @@ def last_unit(df: pd.DataFrame, tag: str, ex_name: str):
     return d, sub[sub["date"] == d]
 
 def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
-    """Double Progression:
-       - Wenn alle Sätze in der letzten Einheit >= high_reps -> Gewicht +inc, Range neu ab unterem Ende
-       - Sonst: gleiches Gewicht, heute +1 Wdh./Satz bis Obergrenze erreicht
-    """
     # Config suchen
     lr = hr = inc = None
     tp = "main"
@@ -86,9 +87,8 @@ def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
     hist_date, unit = last_unit(df, tag, ex_name)
     if unit is None or unit.empty:
         return {
-            "msg": f"Erste Einheit: Wähle Startgewicht. Ziel: {sets_target(tp)} Sätze im Bereich {lr}–{hr} Wdh.",
-            "mode": "start",
-            "lr": lr, "hr": hr, "tp": tp
+            "msg": f"Erste Einheit: Startgewicht wählen. Ziel: {sets_target(tp)} Sätze im Bereich {lr}–{hr}.",
+            "mode": "start", "lr": lr, "hr": hr, "tp": tp
         }
 
     last_w = float(unit["weight"].max())
@@ -98,25 +98,21 @@ def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
     if all_top:
         return {
             "msg": f"Heute **+{inc} kg** → wieder unten starten ({lr}–{lr+1}). Letztes Mal ~{last_w:.1f} kg.",
-            "mode": "add_weight",
-            "inc": inc, "base": last_w, "lr": lr, "hr": hr, "tp": tp
+            "mode": "add_weight","inc": inc,"base": last_w,"lr": lr,"hr": hr,"tp": tp
         }
     else:
         return {
             "msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg, bis {hr} erreicht.",
-            "mode": "add_rep",
-            "inc": 0.0, "base": last_w, "lr": lr, "hr": hr, "tp": tp
+            "mode": "add_rep","inc": 0.0,"base": last_w,"lr": lr,"hr": hr,"tp": tp
         }
 
 def weeks_since(d: date) -> int:
     return max(1, (date.today() - d).days // 7 + 1)
 
 def needs_deload(df: pd.DataFrame, block_start: date, every_weeks: int = 8, slip_tol: int = 2):
-    """Deload-Trigger:
-       1) Zeitbasiert: alle every_weeks
-       2) Leistungsabfall: in >= slip_tol Übungen nacheinander schlechteres Reptotal bei gleicher Last
-    """
+    # 1) Zeitbasiert
     time_flag = (weeks_since(block_start) % every_weeks == 0)
+    # 2) Leistungsabfall (Reptotal bei gleicher Last)
     slips = 0
     for tag in ["A", "B"]:
         for (name, *_ ) in PLAN[tag]:
@@ -133,13 +129,31 @@ def needs_deload(df: pd.DataFrame, block_start: date, every_weeks: int = 8, slip
                 continue
             w1 = float(u1["weight"].max())
             w2 = float(u2["weight"].max())
-            if abs(w1 - w2) <= 0.5:  # gleiche Last
+            if abs(w1 - w2) <= 0.5:
                 if int(u2["reps"].sum()) < int(u1["reps"].sum()):
                     slips += 1
     fatigue_flag = (slips >= slip_tol)
     return (time_flag or fatigue_flag), {"time": time_flag, "fatigue": fatigue_flag, "slips": slips}
 
-# ------------------------- SIDEBAR / SETTINGS -------------------------
+def ex_type(tag: str, ex_name: str) -> str:
+    for n, lr, hr, inc, tp in PLAN[tag]:
+        if n == ex_name:
+            return tp
+    return "main"
+
+def undo_last_set_today(tag: str, name: str):
+    dfx = load_log()
+    today = date.today().isoformat()
+    sub = dfx[(dfx["tag"]==tag) & (dfx["exercise"]==name) & (dfx["date"]==today)]
+    if sub.empty:
+        st.info("Heute kein gespeicherter Satz für diese Übung.")
+        return
+    max_set = int(sub["set"].max())
+    dfx = dfx[~((dfx["tag"]==tag) & (dfx["exercise"]==name) & (dfx["date"]==today) & (dfx["set"]==max_set))]
+    save_log(dfx)
+    st.success(f"Letzten Satz von heute entfernt (Satz {max_set}).")
+
+# ------------------------- SIDEBAR -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
     tag = st.selectbox("Trainingstag", ["A", "B"])
@@ -148,7 +162,7 @@ with st.sidebar:
     deload_drop = st.slider("Deload: Gewichtsreduzierung (%)", 20, 45, 35)
     st.caption("RPE: 8 ≈ 2 Reps Reserve · 9 ≈ 1 RR · 10 = Versagen.")
 
-    # CSV-Import (optional)
+    # CSV-Import
     st.markdown("### 📤 CSV importieren")
     uploaded = st.file_uploader("Vorherige workout_log.csv auswählen", type=["csv"])
     if uploaded is not None:
@@ -165,6 +179,13 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Import fehlgeschlagen: {e}")
 
+    st.markdown("---")
+    with st.expander("⚠️ Datenverwaltung"):
+        confirm = st.checkbox("Ich bestätige, dass ich alle Trainingsdaten löschen möchte.")
+        if st.button("🗑️ Alle Trainingsdaten löschen", disabled=not confirm):
+            save_log(pd.DataFrame(columns=["date","tag","exercise","set","weight","reps","rpe","note"]))
+            st.success("Alle Daten wurden gelöscht.")
+
 # ------------------------- HEADER -------------------------
 st.title("🏋️ Progressions-Coach (A/B)")
 st.write(f"**Heute:** {date.today().isoformat()}  ·  **Tag {tag}**")
@@ -179,98 +200,131 @@ if flag:
         reason += (" & " if reason else "") + f"Leistungsabfall ({meta['slips']})"
     st.warning(f"🔻 Deload empfohlen: {reason}. Vorschlag: ~{deload_drop}% weniger Gewicht, Sätze −30–50%, 3–4 Wdh. in Reserve.")
 
-# ------------------------- EXERCISES / LOGGING -------------------------
+# ------------------------- ÜBUNGEN / BUFFER / LOG -------------------------
 for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     st.subheader(f"{i}. {name} · Ziel {lr}–{hr} Wdh.")
     sug = suggest_target(df, tag, name)
     st.markdown("**Coach:** " + sug["msg"])
 
-    c1, c2, c3, c4 = st.columns([1.3, 1, 1, 1.2])
+    buffer_key = f"{tag}:{name}"
+    if buffer_key not in st.session_state["set_buffer"]:
+        st.session_state["set_buffer"][buffer_key] = []
 
-    # Default-Gewicht aus letzter Einheit:
+    # Defaults
     _, last_u = last_unit(df, tag, name)
     default_w = float(last_u["weight"].max()) if (last_u is not None and not last_u.empty) else 0.0
     base_w = float(sug.get("base", default_w))
+
+    # Eingaben + Satz in Buffer
+    c1, c2, c3, c4 = st.columns([1.2, 0.9, 0.9, 1.3])
     w = c1.number_input("Gewicht (kg)", min_value=0.0, step=0.5, value=base_w, key=f"w_{tag}_{i}")
     r = c2.number_input("Wdh.", min_value=0, step=1, value=lr, key=f"r_{tag}_{i}")
     rpe = c3.slider("RPE", 5.0, 10.0, 8.0, 0.5, key=f"rpe_{tag}_{i}")
-    ok = c4.button("✔️ Satz loggen", key=f"log_{tag}_{i}")
+    add = c4.button("➕ Satz hinzufügen", key=f"add_{tag}_{i}")
 
-    if ok:
-        today = date.today().isoformat()
-        sub_today = df[(df["tag"] == tag) & (df["exercise"] == name) & (df["date"] == today)]
-        next_set = 1 if sub_today.empty else int(sub_today["set"].max()) + 1
-        row = {
-            "date": today,
-            "tag": tag,
-            "exercise": name,
-            "set": next_set,
-            "weight": float(w),
-            "reps": int(r),
-            "rpe": float(rpe),
-            "note": ""
-        }
-        append_row(row)
-        df = load_log()
-        st.success(f"Geloggt: {name} – {w:.1f} kg × {int(r)} (RPE {rpe})")
+    if add:
+        st.session_state["set_buffer"][buffer_key].append({
+            "weight": float(w), "reps": int(r), "rpe": float(rpe)
+        })
+        st.success(f"Satz geplant: {w:.1f} kg × {int(r)} (RPE {rpe})")
+
+    # Status & geplante Sätze anzeigen
+    target_sets = sets_target(sug.get("tp", tp))
+    current_sets = len(st.session_state["set_buffer"][buffer_key])
+    st.caption(f"Geplante Sätze im Buffer: {current_sets}/{target_sets}")
+
+    if current_sets > 0:
+        for idx_buf, row in enumerate(st.session_state["set_buffer"][buffer_key]):
+            cc1, cc2, cc3, cc4, cc5 = st.columns([1.0, 0.9, 0.9, 0.9, 0.8])
+            cc1.markdown(f"**Satz {idx_buf+1}**")
+            cc2.write(f"{row['weight']:.1f} kg")
+            cc3.write(f"{row['reps']} Wdh.")
+            cc4.write(f"RPE {row['rpe']:.1f}")
+            if cc5.button("🗑️ Löschen", key=f"del_{buffer_key}_{idx_buf}"):
+                del st.session_state["set_buffer"][buffer_key][idx_buf]
+                st.info("Satz entfernt.")
+                st.rerun()
+
+        cbuf1, cbuf2 = st.columns(2)
+        if cbuf1.button("🧹 Alle geplanten Sätze verwerfen", key=f"clear_{buffer_key}"):
+            st.session_state["set_buffer"][buffer_key] = []
+            st.info("Alle geplanten Sätze verworfen.")
+            st.rerun()
+
+        if cbuf2.button("💾 Geplante Sätze speichern", key=f"save_{buffer_key}"):
+            today = date.today().isoformat()
+            sub_today = df[(df["tag"] == tag) & (df["exercise"] == name) & (df["date"] == today)]
+            next_set = 1 if sub_today.empty else int(sub_today["set"].max()) + 1
+
+            # persistieren
+            for k, row in enumerate(st.session_state["set_buffer"][buffer_key]):
+                append_row({
+                    "date": today,
+                    "tag": tag,
+                    "exercise": name,
+                    "set": next_set + k,
+                    "weight": row["weight"],
+                    "reps": row["reps"],
+                    "rpe": row["rpe"],
+                    "note": ""
+                })
+
+            st.session_state["set_buffer"][buffer_key] = []
+            df = load_log()
+            st.success("Sätze gespeichert.")
+            st.rerun()
+
+        # Optional: Undo für bereits gespeicherte Sätze von heute
+        if st.button("↩️ Letzten **gespeicherten** Satz von heute zurücknehmen", key=f"undo_{buffer_key}"):
+            undo_last_set_today(tag, name)
+            df = load_log()
+            st.rerun()
 
 # ------------------------- PAUSEN-TIMER -------------------------
 st.markdown("---")
 st.subheader("⏱️ Pausen-Timer")
 
-if "timer_running" not in st.session_state:
-    st.session_state["timer_running"] = False
-if "timer_end" not in st.session_state:
-    st.session_state["timer_end"] = None
-
 c1, c2, c3, c4, c5 = st.columns(5)
 if c1.button("▶️ 60 s"):
-    st.session_state["timer_running"] = True
-    st.session_state["timer_end"] = (datetime.utcnow() + timedelta(seconds=60))
+    st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=60)
 if c2.button("▶️ 90 s"):
-    st.session_state["timer_running"] = True
-    st.session_state["timer_end"] = (datetime.utcnow() + timedelta(seconds=90))
+    st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=90)
 if c3.button("▶️ 120 s"):
-    st.session_state["timer_running"] = True
-    st.session_state["timer_end"] = (datetime.utcnow() + timedelta(seconds=120))
+    st.session_state["timer_end"] = datetime.utcnow() + timedelta(seconds=120)
 if c4.button("+30 s") and st.session_state["timer_end"]:
     st.session_state["timer_end"] = st.session_state["timer_end"] + timedelta(seconds=30)
 if c5.button("⏹ Stopp"):
-    st.session_state["timer_running"] = False
     st.session_state["timer_end"] = None
 
-placeholder = st.empty()
-if st.session_state["timer_running"] and st.session_state["timer_end"]:
-    while True:
-        remaining = int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds())
-        if remaining <= 0:
-            placeholder.markdown(
-                "<div style='font-size:48px; font-weight:700; text-align:center;'>0s</div>",
-                unsafe_allow_html=True
-            )
-            # Beep + Vibration
-            st.components.v1.html("""
-            <audio id="beep" autoplay>
-              <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
-            </audio>
-            <script>
-              if (navigator.vibrate) navigator.vibrate([150,80,150]);
-            </script>
-            """, height=0)
-            st.session_state["timer_running"] = False
-            st.session_state["timer_end"] = None
-            break
-        # Anzeige aktualisieren
-        placeholder.markdown(
-            f"<div style='font-size:48px; font-weight:700; text-align:center;'>{remaining}s</div>",
-            unsafe_allow_html=True
-        )
-        time.sleep(1)
-else:
-    placeholder.markdown(
-        "<div style='font-size:28px; text-align:center; opacity:0.6;'>Timer bereit</div>",
-        unsafe_allow_html=True
-    )
+remaining = 0
+if st.session_state["timer_end"]:
+    remaining = int((st.session_state["timer_end"] - datetime.utcnow()).total_seconds())
+    if remaining <= 0:
+        st.session_state["timer_end"] = None
+        remaining = 0
+
+# Anzeige
+st.markdown(
+    f"<div style='font-size:48px; font-weight:700; text-align:center;'>{remaining}s</div>",
+    unsafe_allow_html=True
+)
+
+# Auto-Refresh jede Sekunde solange Timer aktiv
+if st.session_state["timer_end"]:
+    st.experimental_set_query_params(_=datetime.utcnow().timestamp())  # kleine State-Änderung
+    st.experimental_rerun()
+
+# Beep & Vibration wenn abgelaufen
+if remaining == 0 and st.session_state.get("just_beeped") != date.today().isoformat():
+    st.components.v1.html("""
+    <audio id="beep" autoplay>
+      <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=" type="audio/wav">
+    </audio>
+    <script>
+      if (navigator.vibrate) navigator.vibrate([150,80,150]);
+    </script>
+    """, height=0)
+    st.session_state["just_beeped"] = date.today().isoformat()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
 st.markdown("---")
@@ -281,7 +335,7 @@ with st.expander("📒 Letzte 30 Einträge"):
     else:
         st.dataframe(hist.tail(30), use_container_width=True)
 
-# CSV-Export (Download aufs Handy)
+# CSV-Export (Download)
 hist = load_log()
 csv_bytes = hist.to_csv(index=False).encode("utf-8")
 st.download_button(
@@ -291,5 +345,5 @@ st.download_button(
     mime="text/csv"
 )
 
-st.caption("Hinweise: Neutrale Griffe bei Reizung, kein harter Lockout, langsame Negative. "
+st.caption("Tipps: Neutrale Griffe bei Reizung, kein harter Lockout, langsame Negative. "
            "Deload: Gewicht −30–40 %, Sätze −30–50 %, 3–4 Wdh. in Reserve.")
