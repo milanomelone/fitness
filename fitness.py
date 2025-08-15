@@ -175,10 +175,10 @@ def undo_last_set_today(tag: str, name: str):
 # ------------------------- STICKY TIMER (Parent-DOM, Fullscreen Blink) -------------------------
 def render_sticky_timer():
     """
-    Sticky-Timer oben rechts über die GANZE Seite:
-    - Panel & Overlay werden in window.parent.document injiziert (nicht im iFrame)
-    - Start 60/90/120, Stop, −5/+5
-    - Vollbild-Blinken ~5s + Ton + Vibration bei Ablauf
+    Sticky-Timer oben rechts (Parent-DOM):
+    - Globales window.gxTimer Singleton (tStart/tEnd in ms)
+    - Buttons & Tick lesen/schreiben immer gxTimer
+    - Bei jedem Streamlit-Render werden tStart/tEnd aus Python gesetzt
     """
     start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
     end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
@@ -186,20 +186,41 @@ def render_sticky_timer():
     html = """
     <script>
       (function(){
-        var pdoc = window.parent && window.parent.document ? window.parent.document : document;
+        var W = window.parent || window;
+        var D = W.document;
 
-        // Falls schon vorhanden -> nicht doppelt anlegen
-        if (!pdoc.getElementById('gx-timer-panel')) {
-          // Panel-Container (oben rechts, maximaler z-index)
-          var panel = pdoc.createElement('div');
+        // 1) Singleton initialisieren, falls nicht vorhanden
+        if (!W.gxTimer) {
+          W.gxTimer = {
+            tStart: 0,
+            tEnd: 0,
+            done: false,
+            badge: null,
+            start: function(seconds){
+              var now = Date.now();
+              this.tStart = now;
+              this.tEnd   = now + seconds*1000;
+              this.done   = false;
+            },
+            stop: function(){
+              this.tStart = 0; this.tEnd = 0; this.done = true;
+              if (this.badge) this.badge.textContent = '⏱ 0s';
+            },
+            shift: function(ms){
+              if (!this.tEnd) return;
+              this.tEnd = Math.max(Date.now(), this.tEnd + ms);
+            }
+          };
+
+          // Panel bauen
+          var panel = D.createElement('div');
           panel.id = 'gx-timer-panel';
           panel.style.cssText = [
             'position:fixed','right:16px','top:16px',
             'z-index:2147483647','display:flex','align-items:center','gap:8px'
           ].join(';');
 
-          // Badge
-          var badge = pdoc.createElement('div');
+          var badge = D.createElement('div');
           badge.id = 'gx-timer-badge';
           badge.textContent = '⏱ 0s';
           badge.style.cssText = [
@@ -209,9 +230,10 @@ def render_sticky_timer():
             'box-shadow:0 8px 24px rgba(0,0,0,.35)',
             '-webkit-backdrop-filter:blur(4px)','backdrop-filter:blur(4px)'
           ].join(';');
+          W.gxTimer.badge = badge;
 
           function mkBtn(id, label){
-            var b = pdoc.createElement('button');
+            var b = D.createElement('button');
             b.id = id; b.textContent = label;
             b.style.cssText = [
               'font-size:12px','font-weight:800','line-height:1',
@@ -239,20 +261,17 @@ def render_sticky_timer():
           panel.appendChild(bM5);
           panel.appendChild(bP5);
           panel.appendChild(bStop);
+          D.body.appendChild(panel);
 
-          pdoc.body.appendChild(panel);
-
-          // Vollbild-Blinken (5s)
+          // Effekte
           function fullBlink(){
-            var ov = pdoc.createElement('div');
+            var ov = D.createElement('div');
             ov.id = 'gx-flash-overlay';
             ov.style.cssText = [
               'position:fixed','inset:0','background:#00c853',
               'z-index:2147483646','pointer-events:none','opacity:0'
             ].join(';');
-
-            pdoc.body.appendChild(ov);
-
+            D.body.appendChild(ov);
             var flashes = 0;
             var intv = setInterval(function(){
               ov.style.opacity = (flashes % 2 === 0) ? '0.6' : '0';
@@ -263,10 +282,9 @@ def render_sticky_timer():
               }
             }, 500);
           }
-
           function beep(){
             try {
-              var ctx = new (window.parent.AudioContext || window.parent.webkitAudioContext)();
+              var ctx = new (W.AudioContext || W.webkitAudioContext)();
               var o = ctx.createOscillator(); var g = ctx.createGain();
               o.type = 'sine'; o.frequency.value = 880;
               o.connect(g); g.connect(ctx.destination);
@@ -277,67 +295,52 @@ def render_sticky_timer():
             } catch(e) {}
           }
 
-          // Timer-State
-          var tStart = """ + str(start_ms) + """;
-          var tEnd   = """ + str(end_ms) + """;
-          var done   = false;
+          // Buttons -> Singleton
+          b60 .addEventListener('click', function(){ W.gxTimer.start(60);  });
+          b90 .addEventListener('click', function(){ W.gxTimer.start(90);  });
+          b120.addEventListener('click', function(){ W.gxTimer.start(120); });
+          bM5 .addEventListener('click', function(){ W.gxTimer.shift(-5000); });
+          bP5 .addEventListener('click', function(){ W.gxTimer.shift(+5000); });
+          bStop.addEventListener('click', function(){ W.gxTimer.stop(); });
 
           function fmt(sec){
             if (sec < 60) return sec + 's';
             var m = Math.floor(sec/60), s = sec % 60;
             return m + ':' + (s<10?('0'+s):s);
           }
-          function startTimer(seconds){
-            var now = Date.now();
-            tStart = now; tEnd = now + seconds*1000; done = false;
-          }
-          function stopTimer(){
-            tStart = 0; tEnd = 0; done = true;
-            badge.textContent = '⏱ 0s';
-          }
-          function shiftTimer(ms){
-            if (!tEnd) return;
-            tEnd = Math.max(Date.now(), tEnd + ms);
-          }
-
-          // Buttons
-          b60.addEventListener('click',  function(){ startTimer(60);  });
-          b90.addEventListener('click',  function(){ startTimer(90);  });
-          b120.addEventListener('click', function(){ startTimer(120); });
-          bM5.addEventListener('click',  function(){ shiftTimer(-5000); });
-          bP5.addEventListener('click',  function(){ shiftTimer(+5000); });
-          bStop.addEventListener('click', function(){ stopTimer(); });
-
           function tick(){
+            var tEnd = W.gxTimer.tEnd;
             if (!tEnd || tEnd <= Date.now()){
               badge.textContent = '⏱ 0s';
               return;
             }
             var rem = Math.max(0, Math.floor((tEnd - Date.now())/1000));
             badge.textContent = '⏱ ' + fmt(rem);
-            if (rem === 0 && !done){
-              done = true;
+            if (rem === 0 && !W.gxTimer.done){
+              W.gxTimer.done = true;
               fullBlink(); beep();
-              if (window.parent && window.parent.navigator && window.parent.navigator.vibrate) {
-                window.parent.navigator.vibrate([200,100,200,100,200]);
+              if (W.navigator && W.navigator.vibrate) {
+                W.navigator.vibrate([200,100,200,100,200]);
               }
             }
           }
-          tick();
-          window.setInterval(tick, 250);
+          tick(); W.setInterval(tick, 250);
         }
 
-        // Panel existiert bereits? -> Start/Ende aktualisieren (z.B. nach ✅ Auto-Start)
-        var panelNow = pdoc.getElementById('gx-timer-panel');
-        if (panelNow){
-          panelNow.setAttribute('data-gx-start', '""" + str(start_ms) + """');
-          panelNow.setAttribute('data-gx-end',   '""" + str(end_ms) + """');
+        // 2) Bei JEDEM Streamlit-Render: Backend-Start/Ende in Singleton setzen
+        var newStart = """ + str(start_ms) + """;
+        var newEnd   = """ + str(end_ms) + """;
+        if (newEnd > 0) {
+          // Nur setzen, wenn das Backend einen Timer vorgibt (z.B. Auto-Start nach ✅)
+          W.gxTimer.tStart = newStart;
+          W.gxTimer.tEnd   = newEnd;
+          W.gxTimer.done   = false;
         }
       })();
     </script>
     """
     st.components.v1.html(html, height=0)
-
+    
 # ------------------------- SIDEBAR (nur Settings – KEIN Timer) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
