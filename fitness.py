@@ -75,7 +75,7 @@ def render_sticky_timer():
     """
     st.components.v1.html(html, height=1)
 
-render_sticky_timer()  # <-- jetzt IMMER sichtbar, direkt ab Start
+render_sticky_timer()  # <-- immer sichtbar
 
 # ------------------------- PLAN & EXERCISE POOL -------------------------
 PLAN = {
@@ -144,6 +144,23 @@ def last_unit(df: pd.DataFrame, tag: str, ex_name: str):
     dates = sorted(sub["date"].unique())
     d = dates[-1]
     return d, sub[sub["date"] == d]
+
+def build_last_summary(df: pd.DataFrame, tag: str, ex_name: str):
+    """Erzeugt kompakte Zusammenfassung (Text) + Details-DataFrame der letzten Einheit."""
+    d, u = last_unit(df, tag, ex_name)
+    if u is None or u.empty:
+        return None, None, None
+    # sort by set
+    u = u.sort_values("set")
+    last_w = float(u["weight"].max())
+    reps_list = [int(x) for x in u["reps"].tolist() if pd.notnull(x)]
+    rpe_list  = [float(x) for x in u["rpe"].tolist()  if pd.notnull(x)]
+    max_rpe   = max(rpe_list) if rpe_list else None
+    # kompakter Reps-String, z.B. "10/9/8"
+    reps_str = "/".join(str(r) for r in reps_list) if reps_list else "–"
+    # kleines DataFrame für Details
+    details = u[["set","weight","reps","rpe"]].rename(columns={"set":"Satz","weight":"Gewicht","reps":"Wdh.","rpe":"RPE"})
+    return d, f"{last_w:.1f} kg · Reps: {reps_str}" + (f" · RPE max {max_rpe:.1f}" if max_rpe is not None else ""), details
 
 def suggest_target(df: pd.DataFrame, tag: str, ex_name: str, fallback_meta=None):
     # Range/Inc/Typ ermitteln (bei Tausch fallbacks nutzen)
@@ -307,7 +324,7 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
                                key=f"choose_{tag}_{i}_{today_str}")
     st.session_state["chosen_map"][choose_key] = chosen_name
 
-    # Coach-Empfehlung (bei Tausch Range des Originals als Fallback)
+    # Coach-Empfehlung (bei Tausch: Range des Originals als Fallback)
     sug = suggest_target(df, tag, chosen_name, fallback_meta=(lr,hr,inc,tp))
 
     # Wie viele Sätze heute?
@@ -323,18 +340,25 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
     elif saved_count == target_sets:box_bg = "#1d3a1d"
     else:                           box_bg = "#144d14"
 
+    # Kopf/Kasten
     st.markdown(
         f"""
         <div style="background:{box_bg};padding:12px;border-radius:10px;color:#fff;line-height:1.35;border:1px solid rgba(255,255,255,0.08)" id="ex_{i}">
           <div style="font-weight:700;font-size:18px;">{i}. {chosen_name} · Ziel {lr}–{hr} Wdh.</div>
           <div style="opacity:0.95;"><b>Coach:</b> {sug['msg']}</div>
-          <div style="opacity:0.8;font-size:13px;margin-top:4px;">Heute gespeichert: {saved_count}/{target_sets}</div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    # Defaults aus letzter Einheit
+    # Kompakte Zusammenfassung der letzten Einheit (lesbar, nicht überladen)
+    last_date, summary_text, summary_df = build_last_summary(df, tag, chosen_name)
+    if last_date and summary_text:
+        st.caption(f"Letzte Einheit ({last_date}): {summary_text}")
+        with st.expander("Details anzeigen", expanded=False):
+            st.dataframe(summary_df, use_container_width=True)
+
+    # Standard-Defaults aus letzter Einheit
     _, last_u = last_unit(df, tag, chosen_name)
     last_weight = float(last_u["weight"].max()) if (last_u is not None and not last_u.empty) else 0.0
     base_w = float(sug.get("base", last_weight))
@@ -399,18 +423,10 @@ for i, (orig_name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
             df = load_log()
             st.rerun()
 
-    # Undo & Reset (nur diese Übung, heute)
-    cundo1, cundo2 = st.columns(2)
-    if cundo1.button("↩️ Letzten Satz (heute) zurücknehmen", key=f"undo_btn_{tag}_{i}"):
+    # Undo (nur diese Übung, heute)
+    if st.button("↩️ Letzten Satz (heute) zurücknehmen", key=f"undo_btn_{tag}_{i}"):
         undo_last_set_today(tag, chosen_name)
         df = load_log()
-        st.rerun()
-    if cundo2.button("🧹 Heutige Eingaben (nur diese Übung) zurücksetzen", key=f"reset_today_{tag}_{i}"):
-        for s in range(1, target_sets + 1):
-            st.session_state["saved_flags"].pop(f"{tag}:{chosen_name}:{today_str}:{s}", None)
-            for k in (f"w_{tag}_{i}_{s}", f"r_{tag}_{i}_{s}", f"rpe_{tag}_{i}_{s}", f"chk_{tag}_{i}_{s}"):
-                st.session_state.pop(k, None)
-        st.info("Heutige Eingaben zurückgesetzt.")
         st.rerun()
 
 # ------------------------- VERLAUF & EXPORT -------------------------
