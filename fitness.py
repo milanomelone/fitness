@@ -168,9 +168,8 @@ def undo_last_set_today(tag: str, name: str):
 def render_sticky_timer():
     """
     Sticky-Timer oben rechts (Parent-DOM) mit Singleton:
-    - window.parent.gxTimer hält tStart/tEnd
-    - Bei JEDEM Render werden tStart/tEnd aus Python gesetzt
-    - Volle Seite blinkt ~5s bei 0 (plus Ton/Vibration)
+    - Sicheres Vollbild-Blinken (~5s) + Ton/Vibration
+    - Overlay wird jedes Mal frisch erzeugt (keine „unsichtbar gebliebenen“ Reste)
     """
     start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
     end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
@@ -187,25 +186,46 @@ def render_sticky_timer():
             start: function(seconds){ var now = Date.now(); this.tStart = now; this.tEnd = now + seconds*1000; this.done=false; },
             stop : function(){ this.tStart = 0; this.tEnd = 0; this.done = true; if (this.badge) this.badge.textContent = '⏱ 0s'; },
             shift: function(ms){ if (!this.tEnd) return; this.tEnd = Math.max(Date.now(), this.tEnd + ms); },
+
+            // --- SICHERES BLINKEN ---
             blink: function(){
-              var ov = D.getElementById('gx-flash-overlay');
-              if (!ov){
-                ov = D.createElement('div');
-                ov.id = 'gx-flash-overlay';
-                ov.style.cssText = [
-                  'position:fixed','inset:0','background:#00c853',
-                  'z-index:2147483646','pointer-events:none','opacity:0',
-                  'transition:opacity .2s ease'
-                ].join(';');
-                D.body.appendChild(ov);
-              }
+              // 1) Vorhandenes Overlay entfernen (falls übrig)
+              var old = D.getElementById('gx-flash-overlay');
+              if (old && old.parentNode) old.parentNode.removeChild(old);
+
+              // 2) Neues Overlay erstellen (max z-index)
+              var ov = D.createElement('div');
+              ov.id = 'gx-flash-overlay';
+              ov.style.cssText = [
+                'position:fixed','inset:0',
+                'background:#00c853',         /* kräftiges Grün */
+                'opacity:0',                  /* starten bei 0 */
+                'pointer-events:none',
+                'z-index:2147483647',         /* ganz nach oben */
+                'transition:opacity 120ms ease'
+              ].join(';');
+              D.body.appendChild(ov);
+
+              // Reflow erzwingen, damit die erste Änderung sicher greift
+              void ov.offsetHeight;
+
+              // 3) 5s Blinken (10 Ticks)
               var flashes = 0;
               var intv = setInterval(function(){
-                ov.style.opacity = (flashes % 2 === 0) ? '0.6' : '0';
+                ov.style.opacity = (flashes % 2 === 0) ? '0.65' : '0';
                 flashes++;
-                if (flashes >= 10){ clearInterval(intv); ov.style.opacity = '0'; }
+                if (flashes >= 10){
+                  clearInterval(intv);
+                  if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+                  // Fallback-Effekt kurz entfernen, falls aktiv
+                  D.documentElement.style.removeProperty('filter');
+                }
               }, 500);
+
+              // 4) Fallback: kurzer invert-Flash (falls Overlay verdeckt wird)
+              try { D.documentElement.style.filter = 'invert(0)'; setTimeout(function(){ D.documentElement.style.filter = ''; }, 100); } catch(e){}
             },
+
             beep: function(){
               try {
                 var ctx = new (W.AudioContext || W.webkitAudioContext)();
@@ -260,7 +280,7 @@ def render_sticky_timer():
           panel.appendChild(bM5); panel.appendChild(bP5); panel.appendChild(bStop);
           D.body.appendChild(panel);
 
-          // Buttons -> Singleton
+          // Buttons
           b60 .addEventListener('click', function(){ W.gxTimer.start(60);  });
           b90 .addEventListener('click', function(){ W.gxTimer.start(90);  });
           b120.addEventListener('click', function(){ W.gxTimer.start(120); });
@@ -272,13 +292,13 @@ def render_sticky_timer():
           function tick(){
             var tEnd = W.gxTimer.tEnd;
             if (!tEnd){ W.gxTimer.badge.textContent = '⏱ 0s'; return; }
-            var rem = Math.ceil((tEnd - Date.now())/1000);
+            var rem = Math.floor((tEnd - Date.now())/1000);
             if (rem <= 0){
               W.gxTimer.badge.textContent = '⏱ 0s';
               if (!W.gxTimer.done){
-                W.gxTimer.done = TrueFalseFix = false; // dummy to keep syntax simple
                 W.gxTimer.done = true;
-                W.gxTimer.blink(); W.gxTimer.beep();
+                W.gxTimer.blink();
+                W.gxTimer.beep();
                 if (W.navigator && W.navigator.vibrate) { W.navigator.vibrate([200,100,200,100,200]); }
               }
               return;
@@ -299,7 +319,6 @@ def render_sticky_timer():
       })();
     </script>
     """
-    # Ein winziger Height >0 stellt sicher, dass das iFrame rendert
     st.components.v1.html(html, height=1)
 
 # ------------------------- SIDEBAR (nur Settings – KEIN Timer) -------------------------
