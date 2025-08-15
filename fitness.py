@@ -78,15 +78,13 @@ def last_unit(df: pd.DataFrame, tag: str, ex_name: str):
 
 def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
     """
-    Coach-Logik (dynamisch):
-    - Nutzt letzte Einheit (Gewicht, Reps, RPE) für die Empfehlung.
-    - Regeln:
-        1) Wenn ALLE Sätze >= oberes Ziel (hr) UND max RPE <= 9.0  -> Gewicht + Inkrement
-        2) Wenn max RPE >= 9.5 und nicht am oberen Limit            -> Gewicht HALTEN (erst Reps nachziehen)
-        3) Wenn viele Sätze < unterem Ziel (lr) ODER max RPE sehr hoch -> Gewicht HALTEN, ggf. kleines Minus erwägen
-        4) Sonst: Reps steigern (+1/Satz) bis hr erreicht ist
+    Coach-Logik (dynamisch): nutzt letzte Einheit (Reps + RPE).
+    Regeln:
+      1) Alle Sätze >= hr UND max RPE <= 9.0  -> Gewicht + inc (heute möglich)
+      2) max RPE >= 9.5 und nicht am oberen Limit -> Gewicht halten (erst Reps nachziehen)
+      3) Viele Sätze < lr -> Gewicht halten (optional leicht runter)
+      4) Sonst: Reps steigern (+1/Satz) bis hr erreicht ist
     """
-    # Ziel-Ranges & Inkrement + Typ holen
     lr = hr = inc = None
     tp = "main"
     for n, a, b, c, t in PLAN[tag]:
@@ -95,7 +93,6 @@ def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
             break
 
     hist_date, unit = last_unit(df, tag, ex_name)
-    # Keine Historie -> Start
     if unit is None or unit.empty:
         return {"msg": f"Erste Einheit: Startgewicht wählen. Ziel: {sets_target(tp)} Sätze {lr}–{hr}.",
                 "mode": "start", "lr": lr, "hr": hr, "tp": tp}
@@ -111,30 +108,25 @@ def suggest_target(df: pd.DataFrame, tag: str, ex_name: str):
     many_below_lr = (sets_cnt >= 1) and (sum(r < lr for r in reps_list) >= max(1, sets_cnt // 2))
     near_top      = (sets_cnt >= 1) and all(r >= lr for r in reps_list) and (avg_reps >= (hr - 1))
 
-    # 1) Klarer Fall: Gewicht rauf
     if all_top and max_rpe <= 9.0:
         return {"msg": f"Heute **+{inc} kg** → Range reset ({lr}–{lr+1}). Letztes Mal ~{last_w:.1f} kg (RPE max {max_rpe:.1f}).",
                 "mode":"add_weight","inc":inc,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
 
-    # 2) Sehr hoch belastet -> erst Reps festigen
     if max_rpe >= 9.5 and not all_top:
         hint = "Gewicht halten, Reps Richtung oberes Ziel bringen."
         if many_below_lr:
-            hint = "Gewicht halten (optional −1–2 kg), erst solide in den Zielbereich kommen."
+            hint = "Gewicht halten (optional −1–2 kg), erst stabil in den Zielbereich kommen."
         return {"msg": f"{hint} Letztes Mal: ~{last_w:.1f} kg, Ø{avg_reps:.1f} Wdh., RPE max {max_rpe:.1f}.",
                 "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
 
-    # 3) Viele Sätze unter unterem Ziel -> halten (optional leicht reduzieren)
     if many_below_lr:
         return {"msg": f"Gewicht halten (optional −1–2 kg). Ziel: erst {lr}–{hr} stabil erreichen. Letztes Mal ~{last_w:.1f} kg.",
                 "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
 
-    # 4) In Range, aber nicht top -> Reps steigern
     if near_top and max_rpe <= 9.0:
-        return {"msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg, bis {hr} erreicht. RPE gut ({max_rpe:.1f}).",
+        return {"msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg, bis {hr} erreicht. RPE ok ({max_rpe:.1f}).",
                 "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
 
-    # Default: konservativ Reps steigern
     return {"msg": f"Heute **+1 Wdh./Satz** bei ~{last_w:.1f} kg. Wenn RPE ≤ 9 bleibt, bald +{inc} kg.",
             "mode":"add_rep","inc":0.0,"base":last_w,"lr":lr,"hr":hr,"tp":tp}
 
@@ -172,12 +164,13 @@ def undo_last_set_today(tag: str, name: str):
     st.session_state["saved_flags"].pop(f"{tag}:{name}:{today}:{max_set}", None)
     st.success(f"Satz {max_set} zurückgenommen.")
 
-# ------------------------- STICKY TIMER (Parent-DOM, Fullscreen Blink) -------------------------
+# ------------------------- STICKY TIMER (global Singleton + Fullscreen Blink) -------------------------
 def render_sticky_timer():
     """
     Sticky-Timer oben rechts (Parent-DOM) mit Singleton:
-    - Korrigiertes tick(): rem zuerst berechnen -> Blink/Ton/Vibration sicher auslösen
-    - blink()/beep() als Methoden von window.parent.gxTimer
+    - window.parent.gxTimer hält tStart/tEnd
+    - Bei JEDEM Render werden tStart/tEnd aus Python gesetzt
+    - Volle Seite blinkt ~5s bei 0 (plus Ton/Vibration)
     """
     start_ms = int(st.session_state["timer_start"].timestamp() * 1000) if st.session_state.get("timer_start") else 0
     end_ms   = int(st.session_state["timer_end"].timestamp() * 1000)   if st.session_state.get("timer_end")   else 0
@@ -188,27 +181,12 @@ def render_sticky_timer():
         var W = window.parent || window;
         var D = W.document;
 
-        // 1) Singleton initialisieren, falls nicht vorhanden
         if (!W.gxTimer) {
           W.gxTimer = {
-            tStart: 0,
-            tEnd: 0,
-            done: false,
-            badge: null,
-            start: function(seconds){
-              var now = Date.now();
-              this.tStart = now;
-              this.tEnd   = now + seconds*1000;
-              this.done   = false;
-            },
-            stop: function(){
-              this.tStart = 0; this.tEnd = 0; this.done = true;
-              if (this.badge) this.badge.textContent = '⏱ 0s';
-            },
-            shift: function(ms){
-              if (!this.tEnd) return;
-              this.tEnd = Math.max(Date.now(), this.tEnd + ms);
-            },
+            tStart: 0, tEnd: 0, done: false, badge: null,
+            start: function(seconds){ var now = Date.now(); this.tStart = now; this.tEnd = now + seconds*1000; this.done=false; },
+            stop : function(){ this.tStart = 0; this.tEnd = 0; this.done = true; if (this.badge) this.badge.textContent = '⏱ 0s'; },
+            shift: function(ms){ if (!this.tEnd) return; this.tEnd = Math.max(Date.now(), this.tEnd + ms); },
             blink: function(){
               var ov = D.getElementById('gx-flash-overlay');
               if (!ov){
@@ -225,16 +203,13 @@ def render_sticky_timer():
               var intv = setInterval(function(){
                 ov.style.opacity = (flashes % 2 === 0) ? '0.6' : '0';
                 flashes++;
-                if (flashes >= 10){
-                  clearInterval(intv);
-                  ov.style.opacity = '0';
-                }
+                if (flashes >= 10){ clearInterval(intv); ov.style.opacity = '0'; }
               }, 500);
             },
             beep: function(){
               try {
                 var ctx = new (W.AudioContext || W.webkitAudioContext)();
-                var o = ctx.createOscillator(); var g = ctx.createGain();
+                var o = ctx.createOscillator(), g = ctx.createGain();
                 o.type = 'sine'; o.frequency.value = 880;
                 o.connect(g); g.connect(ctx.destination);
                 g.gain.setValueAtTime(0.0001, ctx.currentTime);
@@ -245,7 +220,7 @@ def render_sticky_timer():
             }
           };
 
-          // Panel bauen
+          // Panel
           var panel = D.createElement('div');
           panel.id = 'gx-timer-panel';
           panel.style.cssText = [
@@ -266,66 +241,24 @@ def render_sticky_timer():
           W.gxTimer.badge = badge;
 
           function mkBtn(id, label){
-            var b = D.createElement('button');
-            b.id = id; b.textContent = label;
+            var b = D.createElement('button'); b.id = id; b.textContent = label;
             b.style.cssText = [
               'font-size:12px','font-weight:800','line-height:1',
               'padding:8px 10px','border-radius:10px',
               'border:1px solid rgba(255,255,255,.15)',
-              'background:rgba(32,32,32,.95)','color:#fff','cursor:pointer',
-              'user-select:none'
+              'background:rgba(32,32,32,.95)','color:#fff','cursor:pointer','user-select:none'
             ].join(';');
             b.onmousedown = function(){ b.style.transform = 'translateY(1px)'; };
             b.onmouseup   = function(){ b.style.transform = ''; };
             return b;
           }
 
-          var b60   = mkBtn('gx-t60','60s');
-          var b90   = mkBtn('gx-t90','90s');
-          var b120  = mkBtn('gx-t120','120s');
-          var bM5   = mkBtn('gx-tminus','−5s');
-          var bP5   = mkBtn('gx-tplus','+5s');
-          var bStop = mkBtn('gx-tstop','Stop');
+          var b60=mkBtn('gx-t60','60s'), b90=mkBtn('gx-t90','90s'), b120=mkBtn('gx-t120','120s');
+          var bM5=mkBtn('gx-tminus','−5s'), bP5=mkBtn('gx-tplus','+5s'), bStop=mkBtn('gx-tstop','Stop');
 
-          panel.appendChild(badge);
-          panel.appendChild(b60);
-          panel.appendChild(b90);
-          panel.appendChild(b120);
-          panel.appendChild(bM5);
-          panel.appendChild(bP5);
-          panel.appendChild(bStop);
+          panel.appendChild(badge); panel.appendChild(b60); panel.appendChild(b90); panel.appendChild(b120);
+          panel.appendChild(bM5); panel.appendChild(bP5); panel.appendChild(bStop);
           D.body.appendChild(panel);
-
-          function fmt(sec){
-            if (sec < 60) return sec + 's';
-            var m = Math.floor(sec/60), s = sec % 60;
-            return m + ':' + (s<10?('0'+s):s);
-          }
-
-          function tick(){
-            var tEnd = W.gxTimer.tEnd;
-            if (!tEnd){
-              badge.textContent = '⏱ 0s';
-              return;
-            }
-            // *** WICHTIG: rem zuerst berechnen ***
-            var rem = Math.ceil((tEnd - Date.now())/1000);
-            if (rem <= 0){
-              badge.textContent = '⏱ 0s';
-              if (!W.gxTimer.done){
-                W.gxTimer.done = true;
-                W.gxTimer.blink();
-                W.gxTimer.beep();
-                if (W.navigator && W.navigator.vibrate) {
-                  W.navigator.vibrate([200,100,200,100,200]);
-                }
-              }
-              return;
-            }
-            badge.textContent = '⏱ ' + fmt(rem);
-          }
-
-          tick(); W.setInterval(tick, 250);
 
           // Buttons -> Singleton
           b60 .addEventListener('click', function(){ W.gxTimer.start(60);  });
@@ -334,9 +267,28 @@ def render_sticky_timer():
           bM5 .addEventListener('click', function(){ W.gxTimer.shift(-5000); });
           bP5 .addEventListener('click', function(){ W.gxTimer.shift(+5000); });
           bStop.addEventListener('click', function(){ W.gxTimer.stop(); });
+
+          function fmt(sec){ if (sec<60) return sec+'s'; var m=Math.floor(sec/60), s=sec%60; return m+':'+(s<10?('0'+s):s); }
+          function tick(){
+            var tEnd = W.gxTimer.tEnd;
+            if (!tEnd){ W.gxTimer.badge.textContent = '⏱ 0s'; return; }
+            var rem = Math.ceil((tEnd - Date.now())/1000);
+            if (rem <= 0){
+              W.gxTimer.badge.textContent = '⏱ 0s';
+              if (!W.gxTimer.done){
+                W.gxTimer.done = TrueFalseFix = false; // dummy to keep syntax simple
+                W.gxTimer.done = true;
+                W.gxTimer.blink(); W.gxTimer.beep();
+                if (W.navigator && W.navigator.vibrate) { W.navigator.vibrate([200,100,200,100,200]); }
+              }
+              return;
+            }
+            W.gxTimer.badge.textContent = '⏱ ' + fmt(rem);
+          }
+          tick(); W.setInterval(tick, 250);
         }
 
-        // 2) Bei JEDEM Streamlit-Render: Backend-Start/Ende in Singleton setzen
+        // Backend-State in Singleton schreiben (bei jedem Render)
         var newStart = """ + str(start_ms) + """;
         var newEnd   = """ + str(end_ms) + """;
         if (newEnd > 0) {
@@ -347,7 +299,9 @@ def render_sticky_timer():
       })();
     </script>
     """
-    st.components.v1.html(html, height=0)
+    # Ein winziger Height >0 stellt sicher, dass das iFrame rendert
+    st.components.v1.html(html, height=1)
+
 # ------------------------- SIDEBAR (nur Settings – KEIN Timer) -------------------------
 with st.sidebar:
     st.header("⚙️ Einstellungen")
@@ -473,7 +427,6 @@ for i, (name, lr, hr, inc, tp) in enumerate(PLAN[tag], start=1):
                         key=f"rpe_{ex_prefix}_{s}", disabled=stored_already)
         save_now = c4.checkbox("✅", value=stored_already, key=f"chk_{ex_prefix}_{s}")
 
-        # Wenn Haken gesetzt und noch nicht gespeichert -> sofort persistieren
         if save_now and not stored_already:
             sub_today = df[(df["date"]==today) & (df["tag"]==tag) & (df["exercise"]==name)]
             next_set = 1 if sub_today.empty else int(sub_today["set"].max()) + 1
